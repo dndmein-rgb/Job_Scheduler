@@ -1,0 +1,117 @@
+name: job-platform
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: job-platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jobplatform
+      POSTGRES_PASSWORD: jobplatform
+      POSTGRES_DB: jobplatform
+    ports:
+      - "5435:5432"
+    volumes:
+      - job_platform_postgres_data:/var/lib/postgresql/data
+    networks:
+      - job-platform-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobplatform -d jobplatform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: job-platform-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8085:80"
+    depends_on:
+      - postgres
+    networks:
+      - job-platform-net
+
+  redis:
+    image: redis/redis-stack:6.2.6-v19
+    container_name: job-platform-redis
+    restart: unless-stopped
+    environment:
+      REDIS_ARGS: "--requirepass jobplatform"
+    ports:
+      - "6381:6379"
+      - "8002:8001"
+    volumes:
+      - job_platform_redis_data:/data
+    networks:
+      - job-platform-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "jobplatform", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: job-platform-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2183:2181"
+    volumes:
+      - job_platform_zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - job-platform-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: job-platform-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9096:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9096
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - job_platform_kafka_data:/var/lib/kafka/data
+    networks:
+      - job-platform-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: job-platform-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    ports:
+      - "8084:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: job-platform-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - job-platform-net
+
+volumes:
+  job_platform_postgres_data:
+  job_platform_redis_data:
+  job_platform_zookeeper_data:
+  job_platform_kafka_data:
+
+networks:
+  job-platform-net:
+    driver: bridge

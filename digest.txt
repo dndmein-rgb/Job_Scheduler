@@ -1,0 +1,2987 @@
+Directory structure:
+└── Distributed job scheduler/
+    ├── docker-compose.yml
+    ├── package.json
+    ├── tsconfig.base.json
+    ├── .env.example
+    ├── apps/
+    │   ├── job-service/
+    │   │   ├── package.json
+    │   │   ├── prisma.config.ts
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   ├── prisma/
+    │   │   │   └── schema.prisma
+    │   │   └── src/
+    │   │       ├── app.ts
+    │   │       ├── server.ts
+    │   │       ├── config/
+    │   │       │   ├── index.ts
+    │   │       │   └── logger.ts
+    │   │       ├── infrastructure/
+    │   │       │   ├── bullmq.ts
+    │   │       │   ├── kafka.ts
+    │   │       │   ├── outbox-publisher.ts
+    │   │       │   ├── prisma.ts
+    │   │       │   └── redis.ts
+    │   │       ├── middlewares/
+    │   │       │   ├── cors.middleware.ts
+    │   │       │   ├── error.middleware.ts
+    │   │       │   ├── req.middleware.ts
+    │   │       │   └── validate.middleware.ts
+    │   │       ├── modules/
+    │   │       │   ├── health/
+    │   │       │   │   └── health.route.ts
+    │   │       │   └── job/
+    │   │       │       ├── job.container.ts
+    │   │       │       ├── job.controller.ts
+    │   │       │       ├── job.interface.ts
+    │   │       │       ├── job.repository.ts
+    │   │       │       ├── job.route.ts
+    │   │       │       ├── job.schema.ts
+    │   │       │       ├── job.service.ts
+    │   │       │       ├── job.state-machine.ts
+    │   │       │       └── job.types.ts
+    │   │       └── types/
+    │   │           └── express.d.ts
+    │   ├── reaper/
+    │   │   ├── package.json
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   └── src/
+    │   │       ├── server.ts
+    │   │       └── config/
+    │   │           ├── index.ts
+    │   │           └── logger.ts
+    │   ├── scheduler/
+    │   │   ├── package.json
+    │   │   ├── tsconfig.json
+    │   │   ├── .env.example
+    │   │   └── src/
+    │   │       ├── server.ts
+    │   │       └── config/
+    │   │           ├── index.ts
+    │   │           └── logger.ts
+    │   └── worker/
+    │       ├── package.json
+    │       ├── tsconfig.json
+    │       ├── .env.example
+    │       └── src/
+    │           ├── server.ts
+    │           └── config/
+    │               ├── index.ts
+    │               └── logger.ts
+    └── packages/
+        ├── shared-events/
+        │   ├── package.json
+        │   ├── tsconfig.json
+        │   └── src/
+        │       ├── index.ts
+        │       └── events/
+        │           ├── job.ts
+        │           └── worker.ts
+        ├── shared-kafka/
+        │   ├── package.json
+        │   ├── tsconfig.json
+        │   └── src/
+        │       ├── client.ts
+        │       ├── consumer.ts
+        │       ├── index.ts
+        │       ├── producer.ts
+        │       └── topics.ts
+        ├── shared-types/
+        │   ├── package.json
+        │   ├── tsconfig.json
+        │   └── src/
+        │       └── index.ts
+        └── shared-utils/
+            ├── package.json
+            ├── tsconfig.json
+            └── src/
+                ├── asyncHandler.ts
+                ├── errors.ts
+                └── index.ts
+
+================================================
+FILE: docker-compose.yml
+================================================
+name: job-platform
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: job-platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: jobplatform
+      POSTGRES_PASSWORD: jobplatform
+      POSTGRES_DB: jobplatform
+    ports:
+      - "5435:5432"
+    volumes:
+      - job_platform_postgres_data:/var/lib/postgresql/data
+    networks:
+      - job-platform-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobplatform -d jobplatform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: job-platform-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8085:80"
+    depends_on:
+      - postgres
+    networks:
+      - job-platform-net
+
+  redis:
+    image: redis/redis-stack:6.2.6-v19
+    container_name: job-platform-redis
+    restart: unless-stopped
+    environment:
+      REDIS_ARGS: "--requirepass jobplatform"
+    ports:
+      - "6381:6379"
+      - "8002:8001"
+    volumes:
+      - job_platform_redis_data:/data
+    networks:
+      - job-platform-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "jobplatform", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: job-platform-zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2183:2181"
+    volumes:
+      - job_platform_zookeeper_data:/var/lib/zookeeper/data
+    networks:
+      - job-platform-net
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: job-platform-kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9096:9093"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9096
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - job_platform_kafka_data:/var/lib/kafka/data
+    networks:
+      - job-platform-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: job-platform-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    ports:
+      - "8084:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: job-platform-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - job-platform-net
+
+volumes:
+  job_platform_postgres_data:
+  job_platform_redis_data:
+  job_platform_zookeeper_data:
+  job_platform_kafka_data:
+
+networks:
+  job-platform-net:
+    driver: bridge
+
+
+================================================
+FILE: package.json
+================================================
+{
+  "name": "job-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-style Distributed Job Platform (Postgres source of truth + BullMQ + Kafka + Outbox)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:job-service": "npm run dev -w @job-platform/job-service",
+    "dev:worker": "npm run dev -w @job-platform/worker",
+    "dev:scheduler": "npm run dev -w @job-platform/scheduler",
+    "dev:reaper": "npm run dev -w @job-platform/reaper",
+    "build:packages": "npm run build -w @job-platform/shared-types && npm run build -w @job-platform/shared-events && npm run build -w @job-platform/shared-kafka && npm run build -w @job-platform/shared-utils",
+    "db:generate": "npm run prisma:generate -w @job-platform/job-service",
+    "db:migrate": "npm run prisma:migrate -w @job-platform/job-service",
+    "db:studio": "npm run prisma:studio -w @job-platform/job-service",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "lint": "npm run lint --workspaces --if-present",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist packages/*/dist"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "prisma": "^7.10.0"
+  }
+}
+
+
+
+================================================
+FILE: tsconfig.base.json
+================================================
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "exactOptionalPropertyTypes": false,
+    "isolatedModules": true
+  }
+}
+
+
+================================================
+FILE: .env.example
+================================================
+POSTGRES_USER=jobplatform
+POSTGRES_PASSWORD=jobplatform
+POSTGRES_DB=jobplatform
+DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
+
+REDIS_HOST=localhost
+REDIS_PORT=6381
+REDIS_PASSWORD=jobplatform
+REDIS_URL=redis://:jobplatform@localhost:6381
+
+KAFKA_BROKER=localhost:9096
+KAFKA_CLIENT_ID=job-platform
+
+JOB_SERVICE_PORT=3010
+
+
+================================================
+FILE: apps/job-service/package.json
+================================================
+{
+  "name": "@job-platform/job-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "db:generate": "npx prisma generate",
+    "db:migrate": "npx prisma migrate dev --name init",
+    "db:studio": "npx prisma studio",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@job-platform/shared-events": "*",
+    "@job-platform/shared-kafka": "*",
+    "@job-platform/shared-types": "*",
+    "@job-platform/shared-utils": "*",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "bullmq": "^5.25.5",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "helmet": "^8.0.0",
+    "ioredis": "^5.4.1",
+    "pg": "^8.23.0",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "pino-pretty": "^11.3.0",
+    "prisma": "^7.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+
+================================================
+FILE: apps/job-service/prisma.config.ts
+================================================
+import "dotenv/config";
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: {
+    path: "prisma/migrations",
+  },
+  datasource: {
+    url: process.env["DATABASE_URL"],
+  },
+});
+
+
+================================================
+FILE: apps/job-service/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+     "types":["node"]
+  },
+  "include": ["src/**/*"],
+
+}
+
+
+================================================
+FILE: apps/job-service/.env.example
+================================================
+NODE_ENV=development
+PORT=3010
+LOG_LEVEL=info
+DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
+REDIS_URL=redis://:jobplatform@localhost:6381
+KAFKA_BROKERS=localhost:9096
+KAFKA_CLIENT_ID=job-service
+CLIENT_ORIGINS=http://localhost:3000
+
+
+
+================================================
+FILE: apps/job-service/prisma/schema.prisma
+================================================
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+
+}
+
+enum JobStatus{
+PENDING
+SCHEDULED
+QUEUED
+RUNNING
+COMPLETED
+FAILED
+RETRYING
+DEAD
+CANCELLED
+}
+enum JobPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Job{
+id             String @id @default(uuid())
+type           String
+priority       JobPriority  @default(MEDIUM)
+status         JobStatus
+payload        Json
+result         Json?
+error          String?
+attempts       Int          @default(0)
+maxAttempts    Int           @default(3)
+leaseOwner     String?
+leaseExpiresAt  DateTime?
+scheduledAt      DateTime?
+idempotencyKey    String?
+tenantId        String?
+  cancelRequested Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  @@unique([idempotencyKey])
+    @@index([status])
+    @@index([status, scheduledAt])
+    @@index([leaseExpiresAt])
+    @@index([status, priority, createdAt])
+    @@index([tenantId])
+    @@map("jobs")
+}
+
+model Outbox{
+id            String        @id @default(uuid())
+eventId        String       @unique
+eventType       String
+topic            String
+payload           Json
+createdAt          DateTime    @default(now())
+publishedAt          DateTime?
+
+
+@@index([publishedAt, createdAt])
+  @@map("outbox")
+
+}
+
+
+
+================================================
+FILE: apps/job-service/src/app.ts
+================================================
+import express from "express";
+import helmet from "helmet";
+import { corsMiddleware } from "./middlewares/cors.middleware.js";
+import { requestLogger } from "./middlewares/req.middleware.js";
+import { errorMiddleware } from "./middlewares/error.middleware.js";
+import healthRoutes from "./modules/health/health.route.js";
+
+export function createApp() {
+  const app = express();
+
+  app.use(helmet());
+  app.use(corsMiddleware);
+  app.use(express.json({ limit: "1mb" }));
+  app.use(requestLogger);
+
+  app.use(healthRoutes);
+
+  app.use((_req, res) => {
+    res.status(404).json({
+      success: false,
+      error: { code: "NOT_FOUND", message: "Route not found" },
+    });
+  });
+
+  app.use(errorMiddleware);
+
+  return app;
+}
+
+
+================================================
+FILE: apps/job-service/src/server.ts
+================================================
+import { createApp } from "./app.js";
+import { config } from "./config/index.js";
+import { logger } from "./config/logger.js";
+import { connectKafka, disconnectKafka } from "./infrastructure/kafka.js";
+import { outboxPublisher } from "./infrastructure/outbox-publisher.js";
+
+const app = createApp();
+
+async function main() {
+  try {
+    await connectKafka();
+  } catch (err) {
+    logger.warn("Kafka connect failed at boot â€“ outbox will retry", { err });
+  }
+
+  outboxPublisher.start(1000);
+
+  const server = app.listen(config.PORT, () => {
+    logger.info("job-service listening", {
+      port: config.PORT,
+      env: config.NODE_ENV,
+    });
+  });
+
+  async function shutdown(signal: string) {
+    logger.info("Shutting down job-serviceâ€¦", { signal });
+    outboxPublisher.stop();
+    server.close(async () => {
+      await disconnectKafka().catch(() => undefined);
+      logger.info("HTTP server closed");
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10_000).unref();
+  }
+
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+}
+
+main().catch((err) => {
+  logger.error("Failed to start job-service", err);
+  process.exit(1);
+});
+
+
+================================================
+FILE: apps/job-service/src/config/index.ts
+================================================
+import "dotenv/config"
+import { z } from "zod";
+
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  PORT: z.coerce.number().default(3010),
+  LOG_LEVEL: z.string().default("info"),
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
+  KAFKA_BROKER: z.string().default("localhost:9096"),
+  KAFKA_CLIENT_ID: z.string().default("job-service"),
+  CLIENT_ORIGINS: z
+        .string()
+        .min(1)
+        .transform((value) => value.split(",").map((origin) => origin.trim())),
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "job-service",
+} as const;
+
+
+================================================
+FILE: apps/job-service/src/config/logger.ts
+================================================
+import pino from "pino";
+import { config } from "./index.js";
+
+const baseLogger = pino({
+  level: config.NODE_ENV === "development" ? "debug" : "info",
+  ...(config.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      },
+    },
+  }),
+  base: {
+    service: config.SERVICE_NAME,
+  },
+});
+
+type LogMeta = Record<string, unknown> | Error | unknown;
+
+type LogFn = {
+  (msg: string, meta?: LogMeta): void;
+  (meta: LogMeta, msg?: string): void;
+};
+
+const toMergingObject = (meta?: LogMeta): Record<string, unknown> => {
+  if (meta === undefined || meta === null) {
+    return {};
+  }
+
+  if (meta instanceof Error) {
+    return {
+      err: {
+        message: meta.message,
+        name: meta.name,
+        stack: meta.stack,
+      },
+    };
+  }
+
+  if (typeof meta === "object") {
+    return meta as Record<string, unknown>;
+  }
+
+  // primitive (string/number/boolean) â€“ wrap it
+  return { value: meta };
+};
+
+const createLogFn = (level: "info" | "error" | "warn" | "debug"): LogFn => {
+  return (msgOrMeta: string | LogMeta, maybeMetaOrMsg?: string | LogMeta) => {
+    // Preferred: message first
+    // logger.error("Error during graceful shutdown", error)
+    // logger.info("Member added", { roomId })
+    if (typeof msgOrMeta === "string") {
+      const msg = msgOrMeta;
+      const obj = toMergingObject(maybeMetaOrMsg);
+      baseLogger[level](obj, msg);
+      return;
+    }
+
+    // Also support: object/error first
+    // logger.error(error, "Error during graceful shutdown")
+    // logger.info({ roomId }, "Member added")
+    const obj = toMergingObject(msgOrMeta);
+    const msg = typeof maybeMetaOrMsg === "string" ? maybeMetaOrMsg : undefined;
+
+    if (msg) {
+      baseLogger[level](obj, msg);
+    } else {
+      baseLogger[level](obj);
+    }
+  };
+};
+
+export const logger = {
+  info: createLogFn("info"),
+  error: createLogFn("error"),
+  warn: createLogFn("warn"),
+  debug: createLogFn("debug"),
+  child: baseLogger.child.bind(baseLogger),
+};
+
+
+================================================
+FILE: apps/job-service/src/infrastructure/bullmq.ts
+================================================
+import { Queue } from "bullmq";
+import { redis } from "./redis.js";
+import { logger } from "../config/logger.js";
+
+export const JOB_QUEUE_NAME = "jobs";
+
+export const jobQueue = new Queue(JOB_QUEUE_NAME, {
+  connection: redis,
+  defaultJobOptions: {
+    removeOnComplete: { count: 1000 },
+    removeOnFail: { count: 5000 },
+    attempts: 1,
+  },
+});
+
+jobQueue.on("error", (err) => {
+  logger.error("BullMQ queue error",{err})
+})
+
+export async function closeJobQueue(): Promise<void> {
+  await jobQueue.close();
+  logger.info("BullMQ job queue closed");
+}
+
+
+================================================
+FILE: apps/job-service/src/infrastructure/kafka.ts
+================================================
+import { createKafkaClient, KafkaProducer } from "@job-platform/shared-kafka";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+const kafka = createKafkaClient({
+  brokers: [config.KAFKA_BROKER],
+  clientId:config.KAFKA_CLIENT_ID
+})
+
+export const kafkaProducer = new KafkaProducer(kafka);
+
+
+export async function connectKafka(): Promise<void> {
+  await kafkaProducer.connect();
+  logger.info( "Kafka producer connected",{ brokers: config.KAFKA_BROKER });
+}
+
+export async function disconnectKafka(): Promise<void> {
+  await kafkaProducer.disconnect();
+  logger.info("Kafka producer disconnected");
+}
+
+
+================================================
+FILE: apps/job-service/src/infrastructure/outbox-publisher.ts
+================================================
+import { prisma } from "./prisma.js";
+import { kafkaProducer } from "./kafka.js";
+import { logger } from "../config/logger.js";
+
+/**
+ * Drains outbox â†’ Kafka.
+ * At-least-once: crash after produce but before mark published may re-send.
+ * Consumers should key off eventId.
+ */
+export class OutboxPublisher {
+  private running = false;
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private tickInFlight = false;
+
+  start(pollIntervalMs = 1000): void {
+    if (this.running) return;
+    this.running = true;
+    logger.info("OutboxPublisher started", { pollIntervalMs });
+    this.timer = setInterval(() => {
+      void this.tick();
+    }, pollIntervalMs);
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    logger.info("OutboxPublisher stopped");
+  }
+
+  private async tick(): Promise<void> {
+    if (!this.running || this.tickInFlight) return;
+    this.tickInFlight = true;
+    try {
+      const batch = await prisma.outbox.findMany({
+        where: { publishedAt: null },
+        orderBy: { createdAt: "asc" },
+        take: 50,
+      });
+
+      for (const row of batch) {
+        try {
+          await kafkaProducer.send({
+            topic: row.topic,
+            messages: [
+              {
+                key: row.eventId,
+                value: JSON.stringify(row.payload),
+                headers: {
+                  eventType: row.eventType,
+                  eventId: row.eventId,
+                },
+              },
+            ],
+          });
+
+          await prisma.outbox.update({
+            where: { id: row.id },
+            data: { publishedAt: new Date() },
+          });
+        } catch (err) {
+          logger.error("Failed to publish outbox row", {
+            outboxId: row.id,
+            eventType: row.eventType,
+            err,
+          });
+          // stop this batch; retry next tick
+          break;
+        }
+      }
+    } catch (err) {
+      logger.error("OutboxPublisher tick failed", { err });
+    } finally {
+      this.tickInFlight = false;
+    }
+  }
+}
+
+export const outboxPublisher = new OutboxPublisher();
+
+
+================================================
+FILE: apps/job-service/src/infrastructure/prisma.ts
+================================================
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "../generated/prisma/client.js";
+import { config } from "../config/index.js";
+import pg from "pg";
+import { logger } from "../config/logger.js";
+
+const pool = new pg.Pool({ connectionString: config.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    adapter,
+    log:
+      config.NODE_ENV === "development"
+        ? ["error", "warn"]
+        : ["error"],
+  });
+
+if (config.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+
+
+prisma.$on("query" as never, (e: { query: string; duration: number }) => {
+  if (config.LOG_LEVEL === "debug") {
+    logger.debug("prisma query",{ query: e.query, durationMs: e.duration });
+  }
+});
+
+export type {
+  Job,
+  Outbox,
+  JobStatus,
+  JobPriority,
+  Prisma,
+} from "../generated/prisma/client.js";
+
+
+================================================
+FILE: apps/job-service/src/infrastructure/redis.ts
+================================================
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+class RedisClient {
+  private static instance: Redis | null = null;
+  private static connected = false;
+
+  private constructor() {}
+
+  static getInstance(): Redis {
+    if (RedisClient.instance) {
+      return RedisClient.instance;
+    }
+
+    const client = new Redis(config.REDIS_URL, {
+      retryStrategy: (times: number) => {
+        const delay = Math.min(times * 500, 5000);
+
+        logger.warn(
+          { attempt: times, delayMs: delay },
+          "Redis reconnect attempt",
+        );
+
+        return delay;
+      },
+      maxRetriesPerRequest: null,
+      enableReadyCheck: true,
+    });
+
+    RedisClient.instance = client;
+    RedisClient.setupEventListeners(client);
+
+    return client;
+  }
+
+  private static setupEventListeners(client: Redis): void {
+    client.on("connect", () => {
+      logger.info("Redis TCP connection established");
+    });
+
+    client.on("ready", () => {
+      RedisClient.connected = true;
+      logger.info("Redis client is ready");
+    });
+
+    client.on("error", (error: Error) => {
+      RedisClient.connected = false;
+      logger.error({ err: error }, "Redis connection error");
+    });
+
+    client.on("close", () => {
+      RedisClient.connected = false;
+      logger.warn("Redis connection closed");
+    });
+
+    client.on("reconnecting", () => {
+      RedisClient.connected = false;
+      logger.warn("Reconnecting to Redis");
+    });
+
+    client.on("end", () => {
+      RedisClient.connected = false;
+      logger.warn("Redis connection ended");
+    });
+  }
+
+  static isReady(): boolean {
+    return RedisClient.connected;
+  }
+
+  static async testConnection(): Promise<boolean> {
+    try {
+      const response = await RedisClient.getInstance().ping();
+
+      if (response === "PONG") {
+        logger.info("Redis ping successful");
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      logger.error({ err: error }, "Redis connection test failed");
+      return false;
+    }
+  }
+
+  static async closeConnection(): Promise<void> {
+    const client = RedisClient.instance;
+
+    if (!client) {
+      return;
+    }
+
+    try {
+      await client.quit();
+      logger.info("Redis connection closed gracefully");
+    } catch (error) {
+      logger.error({ err: error }, "Error closing Redis connection");
+      client.disconnect();
+    } finally {
+      RedisClient.instance = null;
+      RedisClient.connected = false;
+    }
+  }
+}
+
+export const redis = RedisClient.getInstance();
+
+export default RedisClient;
+
+
+================================================
+FILE: apps/job-service/src/middlewares/cors.middleware.ts
+================================================
+import cors from "cors";
+import { config } from "../config/index.js";
+
+const allowedOrigins = config.CLIENT_ORIGINS
+
+
+export const corsMiddleware = cors({
+  origin: (origin, callback) => {
+    // Requests without an Origin header include curl, Postman,
+    // and server-to-server requests.
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error("Origin not allowed by CORS"));
+  },
+
+  credentials: true,
+
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+
+  allowedHeaders: ["Content-Type", "Authorization"],
+
+  optionsSuccessStatus: 204,
+});
+
+
+================================================
+FILE: apps/job-service/src/middlewares/error.middleware.ts
+================================================
+import type { Request, Response, NextFunction } from "express";
+import { AppError } from "@job-platform/shared-utils";
+import { logger } from "../config/logger.js";
+
+export function errorMiddleware(
+  err: Error,
+  _req: Request,
+  res: Response,
+  _next: NextFunction,
+): void {
+  if (err instanceof AppError) {
+    logger.warn({ err, code: err.code }, err.message);
+    res.status(err.statusCode).json({
+      success: false,
+      error: {
+        code: err.code,
+        message: err.message,
+        details: err.details,
+      },
+    });
+    return;
+  }
+
+  logger.error({ err }, "Unhandled error");
+  res.status(500).json({
+    success: false,
+    error: {
+      code: "INTERNAL_ERROR",
+      message:
+        process.env.NODE_ENV === "production"
+          ? "An unexpected error occurred"
+          : err.message,
+    },
+  });
+}
+
+
+================================================
+FILE: apps/job-service/src/middlewares/req.middleware.ts
+================================================
+import { RequestHandler } from "express";
+import { logger } from "../config/logger.js";
+
+export const requestLogger: RequestHandler=(req,res,next)=> {
+  const start = process.hrtime.bigint();
+  
+    res.on("finish", () => {
+      const durationMs =
+        Number(process.hrtime.bigint() - start) / 1_000_000;
+  
+      logger.info(
+        `${req.method} ${req.originalUrl} ${res.statusCode} - ${durationMs.toFixed(2)} ms`,
+      );
+    });
+  
+    next();
+}
+
+
+================================================
+FILE: apps/job-service/src/middlewares/validate.middleware.ts
+================================================
+import type { Request, Response, NextFunction, RequestHandler } from "express";
+import type { ZodSchema } from "zod";
+import { ValidationError } from "@job-platform/shared-utils";
+
+export function validateBody<T>(schema: ZodSchema<T>): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      next(new ValidationError("Invalid request body", result.error.flatten()));
+      return;
+    }
+    req.body = result.data;
+    next();
+  };
+}
+
+export function validateQuery<T>(schema: ZodSchema<T>): RequestHandler {
+  return (req: Request, _res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.query);
+    if (!result.success) {
+      next(new ValidationError("Invalid query parameters", result.error.flatten()));
+      return;
+    }
+    (req as Request & { validatedQuery: T }).validatedQuery = result.data;
+    next();
+  };
+}
+
+
+================================================
+FILE: apps/job-service/src/modules/health/health.route.ts
+================================================
+import { Router } from "express";
+import type { Request, Response } from "express";
+
+const router = Router();
+
+router.get("/health", (_req: Request, res: Response) => {
+  res.status(200).json({
+    success: true,
+    data: {
+      status: "ok",
+      service: "job-service",
+      timestamp: new Date().toISOString(),
+    },
+  });
+});
+
+router.get("/ready", (_req: Request, res: Response) => {
+  res.status(200).json({
+    success: true,
+    data: {
+      status: "ready",
+      checks: {
+        postgres: "not_checked_yet",
+        redis: "not_checked_yet",
+        kafka: "not_checked_yet",
+      },
+    },
+  });
+});
+
+export default router;
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.container.ts
+================================================
+import { JobRepository } from "./job.repository.js";
+import { JobService } from "./job.service.js";
+
+const jobRepository = new JobRepository()
+export const jobService=new JobService(jobRepository) 
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.controller.ts
+================================================
+import { asyncHandler } from "@job-platform/shared-utils";
+import type{Request,Response} from 'express'
+import { CreateJobBody, ListJobsQuery } from "./job.schema.js";
+import { jobService } from "./job.container.js";
+
+export const create = asyncHandler(async (req:Request,res:Response) => {
+  const body = req.body as CreateJobBody;
+  const job = await jobService.create({
+    type: body.type,
+          payload: body.payload,
+          priority: body.priority,
+          maxAttempts: body.maxAttempts,
+          scheduledAt: body.scheduledAt ?? undefined,
+          idempotencyKey: body.idempotencyKey,
+          tenantId: body.tenantId,
+  })
+  res.status(201).json({ success: true, data: job });
+})
+
+export const getById = asyncHandler(async (req: Request, res: Response) => {
+  const job = await jobService.getById(req.params.id as string)
+  res.status(200).json({ success: true, data: job });
+})
+
+export const list = asyncHandler(async (req: Request, res: Response) => { 
+  const query =
+        (req as Request & { validatedQuery?: ListJobsQuery }).validatedQuery ??
+        (req.query as unknown as ListJobsQuery);
+
+  const result=await jobService.list({status: query.status,
+        type: query.type,
+        tenantId: query.tenantId,
+        page: query.page,
+        limit: query.limit})
+  res.status(200).json({
+        success: true,
+        data: result.items,
+        meta: {
+          total: result.total,
+          page: result.page,
+          limit: result.limit,
+          totalPages: result.totalPages,
+        },
+      });
+  
+})
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.interface.ts
+================================================
+import { Job, type Prisma } from "../../infrastructure/prisma.js";
+import { CreateJobInput, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
+
+export interface JobInterface {
+  findById(id: string): Promise<Job | null>;
+  findByIdempotencyKey(key: string): Promise<Job | null>;
+  createWithOutbox(
+    input: CreateJobInput,
+    events: OutboxEventInput[],
+    jobId?:string
+  ): Promise<Job>;
+
+  list(filter: ListJobsFilter): Promise<ListJobsResult>
+   updateStatusWithOutbox(
+      id: string,
+      data: Prisma.JobUpdateInput,
+      events: OutboxEventInput[],
+    ): Promise<Job>
+}
+
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.repository.ts
+================================================
+import { generateId } from "@job-platform/shared-utils";
+import { Job, Prisma, prisma } from "../../infrastructure/prisma.js";
+import { JobInterface } from "./job.interface.js";
+import { initialStatusForCreate } from "./job.state-machine.js";
+import {
+  CreateJobInput,
+  ListJobsFilter,
+  ListJobsResult,
+  OutboxEventInput,
+} from "./job.types.js";
+
+export class JobRepository implements JobInterface {
+  async findById(id: string): Promise<Job | null> {
+    return prisma.job.findUnique({
+      where: { id },
+    });
+  }
+  async findByIdempotencyKey(key: string): Promise<Job | null> {
+    return prisma.job.findUnique({
+      where: { idempotencyKey: key },
+    });
+  }
+  /**
+   * Create job + outbox row(s) atomically.
+   * Why one transaction? Outbox pattern â€” no dual-write with Kafka.
+   */
+  async createWithOutbox(
+    input: CreateJobInput,
+    events: OutboxEventInput[],
+    jobId?:string
+  ): Promise<Job> {
+    const status = initialStatusForCreate(input.scheduledAt ?? null);
+    const id = jobId ?? generateId();
+    return prisma.$transaction(async (tx) => {
+      const job = await tx.job.create({
+        data: {
+          id,
+          type: input.type,
+          status,
+          priority: input.priority ?? "MEDIUM",
+          payload: input.payload,
+          maxAttempts: input.maxAttempts??3,
+          scheduledAt: input.scheduledAt,
+          idempotencyKey: input.idempotencyKey ?? null,
+          tenantId: input.tenantId ?? null,
+          attempts: 0,
+          cancelRequested: false,
+        },
+      });
+      if (events.length > 0) {
+        await tx.outbox.createMany({
+          data: events.map((e) => ({
+            id: generateId(),
+            eventId: e.eventId,
+            eventType: e.eventType,
+            topic: e.topic,
+            payload: e.payload,
+            publishedAt: null,
+          })),
+        });
+      }
+      return job;
+    });
+  }
+
+  async list(filter: ListJobsFilter): Promise<ListJobsResult> {
+    const page = Math.max(1, filter.page ?? 1);
+    const limit = Math.min(100, Math.max(1, filter.limit ?? 20));
+    const skip = (page - 1) * limit;
+    const where: Prisma.JobWhereInput = {};
+    if (filter.status) where.status = filter.status;
+    if (filter.type) where.type = filter.type;
+    if (filter.tenantId) where.tenantId = filter.tenantId;
+
+    const [items, total] = await Promise.all([
+      prisma.job.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+      }),
+      prisma.job.count({ where }),
+    ]);
+    return {
+      items,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+    };
+  }
+
+  /**
+   * Status update with optional outbox events (used from Phase 2+).
+   * Service must call assertTransition before this.
+   */
+
+  async updateStatusWithOutbox(
+    id: string,
+    data: Prisma.JobUpdateInput,
+    events: OutboxEventInput[],
+  ): Promise<Job> {
+    return prisma.$transaction(async (tx) => {
+      const job = await tx.job.update({
+        where: { id },
+        data,
+      });
+      if (events.length > 0) {
+        await tx.outbox.createMany({
+          data: events.map((e) => ({
+            id: generateId(),
+            eventId: e.eventId,
+            eventType: e.eventType,
+            topic: e.topic,
+            payload: e.payload,
+            publishedAt: null,
+          })),
+        });
+      }
+      return job;
+    });
+  }
+}
+
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.route.ts
+================================================
+import { Router } from "express";
+import { validateBody, validateQuery } from "../../middlewares/validate.middleware.js";
+import { createJobBodySchema, listJobsQuerySchema } from "./job.schema.js";
+import { create, getById, list } from "./job.controller.js";
+
+  const router = Router();
+
+  router.post(
+    "/",
+    validateBody(createJobBodySchema),
+    create,
+  );
+
+  router.get(
+    "/",
+    validateQuery(listJobsQuerySchema),
+    list,
+  );
+
+  router.get(
+    "/:id",
+    getById,
+  );
+
+  export default router
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.schema.ts
+================================================
+import { JobPriority, JobStatus } from "@job-platform/shared-types";
+import { z } from "zod";
+
+export const createJobBodySchema = z.object({
+  type: z.string().min(1).max(128),
+  payload: z.record(z.unknown()).default({}),
+  priority: z.nativeEnum(JobPriority).optional(),
+  maxAttempts: z.number().int().min(1).max(25).optional(),
+  scheduledAt: z.coerce.date().optional().nullable(),
+  idempotencyKey: z.string().min(1).max(256).optional().nullable(),
+  tenantId: z.string().min(1).max(128).optional().nullable(),
+});
+
+export type CreateJobBody = z.infer<typeof createJobBodySchema>;
+export const listJobsQuerySchema = z.object({
+  status: z.nativeEnum(JobStatus).optional(),
+  type: z.string().min(1).optional(),
+  tenantId: z.string().min(1).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+export type ListJobsQuery = z.infer<typeof listJobsQuerySchema>;
+
+export const jobIdParamsSchema = z.object({
+  id: z.string().uuid(),
+});
+
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.service.ts
+================================================
+import { JobInterface } from "./job.interface.js";
+import { CreateJobInput, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
+import { logger } from "../../config/logger.js";
+import { initialStatusForCreate } from "./job.state-machine.js";
+import { generateId, NotFoundError } from "@job-platform/shared-utils";
+import { JOB_EVENT_TYPES } from "@job-platform/shared-events";
+import { TOPICS } from "@job-platform/shared-kafka";
+import type{ Job } from "../../infrastructure/prisma.js";
+
+export class JobService{
+  constructor(private readonly repo: JobInterface) { }
+  async create(input: CreateJobInput): Promise<Job>{
+    if (input.idempotencyKey) {
+      const existing = await this.repo.findByIdempotencyKey(input.idempotencyKey);
+      if (existing) {
+        logger.info("Idempotent create â€“ returning existing job", {
+                  jobId: existing.id,
+                  idempotencyKey: input.idempotencyKey,
+                });
+                return existing;
+      }
+    }
+    const status = initialStatusForCreate(input.scheduledAt);
+    const eventId = generateId();
+    const jobId = generateId();
+    const events = this.buildCreatedEvents({
+      jobId,
+            type: input.type,
+            status,
+            priority: input.priority ?? "MEDIUM",
+            scheduledAt: input.scheduledAt ?? null,
+            idempotencyKey: input.idempotencyKey ?? null,
+            maxAttempts: input.maxAttempts ?? 3,
+            tenantId: input.tenantId ?? null,
+            eventId,
+    })
+    const job=await this.repo.createWithOutbox({...input},events,jobId)
+    logger.info("Job created", { jobId: job.id, status: job.status, type: job.type });
+        return job;
+  }
+
+  async getById(id: string): Promise<Job> {
+      const job = await this.repo.findById(id);
+      if (!job) {
+        throw new NotFoundError("Job", id);
+      }
+      return job;
+    }
+  
+    async list(filter: ListJobsFilter): Promise<ListJobsResult> {
+      return this.repo.list(filter);
+    }
+  private buildCreatedEvents(args: {
+    jobId: string;
+    type: string;
+    status: string;
+    priority: string;
+    scheduledAt: Date | null;
+    idempotencyKey: string | null;
+        maxAttempts: number;
+        tenantId: string | null;
+        eventId: string;
+  }): OutboxEventInput[]{
+    const occurredAt = new Date().toISOString();
+    const base = {
+      eventId: args.eventId,
+      occurredAt,
+      jobId: args.jobId,
+      jobType: args.type,
+      tenantId:args.tenantId
+    }
+    const created: OutboxEventInput = {
+          eventId: args.eventId,
+          eventType: JOB_EVENT_TYPES.CREATED,
+          topic: TOPICS.JOB_EVENTS,
+          payload: {
+            ...base,
+            eventType: JOB_EVENT_TYPES.CREATED,
+            payload: {
+              status: args.status,
+              priority: args.priority,
+              scheduledAt: args.scheduledAt?.toISOString() ?? null,
+              idempotencyKey: args.idempotencyKey,
+              maxAttempts: args.maxAttempts,
+            },
+          },
+        };
+
+    // Optional second event for clarity in Kafka UI
+        const followUpType =
+          args.status === "SCHEDULED"
+            ? JOB_EVENT_TYPES.SCHEDULED
+            : JOB_EVENT_TYPES.QUEUED;
+        const followUp: OutboxEventInput = {
+              eventId: generateId(),
+              eventType: followUpType,
+              topic: TOPICS.JOB_EVENTS,
+              payload: {
+                ...base,
+                eventId: undefined, // set below
+                eventType: followUpType,
+                payload:
+                  followUpType === JOB_EVENT_TYPES.SCHEDULED
+                    ? { scheduledAt: args.scheduledAt!.toISOString() }
+                    : { status: args.status, priority: args.priority },
+              },
+            };
+            // fix eventId on payload
+            (followUp.payload as { eventId: string }).eventId = followUp.eventId;
+        
+            return [created, followUp];
+  }
+}
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.state-machine.ts
+================================================
+/**
+ * Explicit lifecycle graph.
+ * Why? Prevents illegal updates and documents the system in one place.
+ */
+
+import { JobStatus } from "@job-platform/shared-types";
+import { InvalidStateTransitionError } from "@job-platform/shared-utils";
+
+
+
+
+const ALLOWED_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
+  PENDING: [JobStatus.QUEUED, JobStatus.SCHEDULED, JobStatus.CANCELLED],
+  SCHEDULED: [JobStatus.QUEUED, JobStatus.CANCELLED],
+  QUEUED: [JobStatus.RUNNING, JobStatus.CANCELLED],
+  RUNNING: [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED],
+    FAILED: [JobStatus.RETRYING, JobStatus.DEAD],
+    RETRYING: [JobStatus.QUEUED],
+    COMPLETED: [],
+    DEAD: [],
+    CANCELLED: [],
+}
+
+export function canTransition(from: JobStatus, to: JobStatus):boolean {
+  return ALLOWED_TRANSITIONS[from].includes(to)
+}
+
+export function assertTransition(from: JobStatus, to: JobStatus): void{
+  if (!canTransition(from, to)) {
+      throw new InvalidStateTransitionError(from, to);
+    }
+}
+
+export function initialStatusForCreate(scheduledAT: Date | null | undefined): JobStatus{
+  if (scheduledAT && scheduledAT.getTime() > Date.now()) {
+    return JobStatus.SCHEDULED
+  }
+  return JobStatus.QUEUED
+}
+
+
+
+================================================
+FILE: apps/job-service/src/modules/job/job.types.ts
+================================================
+import type { Job, JobPriority, JobStatus, Prisma } from "../../infrastructure/prisma.js";
+
+export type CreateJobInput = {
+  type:  string;
+  payload: Prisma.InputJsonValue;
+  priority?: JobPriority;
+  maxAttempts?: number;
+  scheduledAt?: Date;
+  idempotencyKey?: string | null;
+  tenantId?:string|null
+}
+
+export type ListJobsFilter = {
+  status?: JobStatus;
+  type?: string
+  tenantId?: string;
+    page?: number;
+    limit?: number;
+}
+
+export type ListJobsResult = {
+  items: Job[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+};
+
+export type OutboxEventInput = {
+  eventId: string;
+  eventType: string;
+  topic: string;
+  payload: Prisma.InputJsonValue;
+};
+
+
+================================================
+FILE: apps/job-service/src/types/express.d.ts
+================================================
+import type { Logger } from "pino";
+
+declare global {
+  namespace Express {
+    interface Request {
+      log?: Logger;
+      userId?: string;
+    }
+  }
+}
+
+export {};
+
+
+================================================
+FILE: apps/reaper/package.json
+================================================
+{
+  "name": "@job-platform/reaper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@job-platform/shared-events": "*",
+    "@job-platform/shared-kafka": "*",
+    "@job-platform/shared-types": "*",
+    "@job-platform/shared-utils": "*",
+    "@prisma/client": "^7.10.0",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "pino-pretty": "^11.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+
+================================================
+FILE: apps/reaper/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*"],
+
+}
+
+
+================================================
+FILE: apps/reaper/.env.example
+================================================
+NODE_ENV=development
+LOG_LEVEL=info
+REAPER_POLL_INTERVAL_MS=5000
+LEASE_GRACE_MS=2000
+DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
+KAFKA_BROKER=localhost:9096
+KAFKA_CLIENT_ID=reaper
+
+
+================================================
+FILE: apps/reaper/src/server.ts
+================================================
+import { config } from "./config/index.js";
+import { logger } from "./config/logger.js";
+
+logger.info(
+  {
+    pollIntervalMs: config.REAPER_POLL_INTERVAL_MS,
+    leaseGraceMs: config.LEASE_GRACE_MS,
+    env: config.NODE_ENV,
+  },
+  "Reaper starting (Phase 0 â€“ skeleton)",
+);
+
+logger.info("Reaper idle. Implement lease recovery in Phase 3.");
+
+async function shutdown(signal: string) {
+  logger.info({ signal }, "Shutting down reaperâ€¦");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+
+================================================
+FILE: apps/reaper/src/config/index.ts
+================================================
+import "dotenv/config"
+import { z } from "zod";
+
+  const envSchema = z.object({
+    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    LOG_LEVEL: z.string().default("info"),
+    REAPER_POLL_INTERVAL_MS: z.coerce.number().default(5000),
+    LEASE_GRACE_MS: z.coerce.number().default(2000),
+    DATABASE_URL: z.string().min(1),
+    KAFKA_BROKER: z.string().default("localhost:9096"),
+    KAFKA_CLIENT_ID: z.string().default("reaper"),
+  
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "reaper",
+} as const;
+
+
+================================================
+FILE: apps/reaper/src/config/logger.ts
+================================================
+import pino from "pino";
+import { config } from "./index.js";
+
+const baseLogger = pino({
+  level: config.NODE_ENV === "development" ? "debug" : "info",
+  ...(config.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      },
+    },
+  }),
+  base: {
+    service: config.SERVICE_NAME,
+  },
+});
+
+type LogMeta = Record<string, unknown> | Error | unknown;
+
+type LogFn = {
+  (msg: string, meta?: LogMeta): void;
+  (meta: LogMeta, msg?: string): void;
+};
+
+const toMergingObject = (meta?: LogMeta): Record<string, unknown> => {
+  if (meta === undefined || meta === null) {
+    return {};
+  }
+
+  if (meta instanceof Error) {
+    return {
+      err: {
+        message: meta.message,
+        name: meta.name,
+        stack: meta.stack,
+      },
+    };
+  }
+
+  if (typeof meta === "object") {
+    return meta as Record<string, unknown>;
+  }
+
+  // primitive (string/number/boolean) â€“ wrap it
+  return { value: meta };
+};
+
+const createLogFn = (level: "info" | "error" | "warn" | "debug"): LogFn => {
+  return (msgOrMeta: string | LogMeta, maybeMetaOrMsg?: string | LogMeta) => {
+    // Preferred: message first
+    // logger.error("Error during graceful shutdown", error)
+    // logger.info("Member added", { roomId })
+    if (typeof msgOrMeta === "string") {
+      const msg = msgOrMeta;
+      const obj = toMergingObject(maybeMetaOrMsg);
+      baseLogger[level](obj, msg);
+      return;
+    }
+
+    // Also support: object/error first
+    // logger.error(error, "Error during graceful shutdown")
+    // logger.info({ roomId }, "Member added")
+    const obj = toMergingObject(msgOrMeta);
+    const msg = typeof maybeMetaOrMsg === "string" ? maybeMetaOrMsg : undefined;
+
+    if (msg) {
+      baseLogger[level](obj, msg);
+    } else {
+      baseLogger[level](obj);
+    }
+  };
+};
+
+export const logger = {
+  info: createLogFn("info"),
+  error: createLogFn("error"),
+  warn: createLogFn("warn"),
+  debug: createLogFn("debug"),
+  child: baseLogger.child.bind(baseLogger),
+};
+
+
+================================================
+FILE: apps/scheduler/package.json
+================================================
+{
+  "name": "@job-platform/scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@job-platform/shared-events": "*",
+    "@job-platform/shared-kafka": "*",
+    "@job-platform/shared-types": "*",
+    "@job-platform/shared-utils": "*",
+    "@prisma/client": "^7.10.0",
+    "bullmq": "^5.25.5",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1",
+    "pino": "^9.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "pino-pretty": "^11.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+
+================================================
+FILE: apps/scheduler/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*"],
+  
+}
+
+
+================================================
+FILE: apps/scheduler/.env.example
+================================================
+NODE_ENV=development
+LOG_LEVEL=info
+SCHEDULER_POLL_INTERVAL_MS=2000
+DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
+REDIS_URL=redis://:jobplatform@localhost:6381
+KAFKA_BROKERS=localhost:9096
+KAFKA_CLIENT_ID=scheduler
+
+
+================================================
+FILE: apps/scheduler/src/server.ts
+================================================
+import { config } from "./config/index.js";
+import { logger } from "./config/logger.js";
+
+logger.info(
+  { pollIntervalMs: config.SCHEDULER_POLL_INTERVAL_MS, env: config.NODE_ENV },
+  "Scheduler starting (Phase 0 â€“ skeleton)",
+);
+
+logger.info("Scheduler idle. Implement polling loop in Phase 4.");
+
+async function shutdown(signal: string) {
+  logger.info({ signal }, "Shutting down schedulerâ€¦");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+
+================================================
+FILE: apps/scheduler/src/config/index.ts
+================================================
+import "dotenv/config"
+import { z } from "zod";
+
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    LOG_LEVEL: z.string().default("info"),
+    SCHEDULER_POLL_INTERVAL_MS: z.coerce.number().default(2000),
+    DATABASE_URL: z.string().min(1),
+    REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
+    KAFKA_BROKER: z.string().default("localhost:9096"),
+    KAFKA_CLIENT_ID: z.string().default("scheduler"),
+  
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  SERVICE_NAME: "scheduler",
+} as const;
+
+
+================================================
+FILE: apps/scheduler/src/config/logger.ts
+================================================
+import pino from "pino";
+import { config } from "./index.js";
+
+const baseLogger = pino({
+  level: config.NODE_ENV === "development" ? "debug" : "info",
+  ...(config.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      },
+    },
+  }),
+  base: {
+    service: config.SERVICE_NAME,
+  },
+});
+
+type LogMeta = Record<string, unknown> | Error | unknown;
+
+type LogFn = {
+  (msg: string, meta?: LogMeta): void;
+  (meta: LogMeta, msg?: string): void;
+};
+
+const toMergingObject = (meta?: LogMeta): Record<string, unknown> => {
+  if (meta === undefined || meta === null) {
+    return {};
+  }
+
+  if (meta instanceof Error) {
+    return {
+      err: {
+        message: meta.message,
+        name: meta.name,
+        stack: meta.stack,
+      },
+    };
+  }
+
+  if (typeof meta === "object") {
+    return meta as Record<string, unknown>;
+  }
+
+  // primitive (string/number/boolean) â€“ wrap it
+  return { value: meta };
+};
+
+const createLogFn = (level: "info" | "error" | "warn" | "debug"): LogFn => {
+  return (msgOrMeta: string | LogMeta, maybeMetaOrMsg?: string | LogMeta) => {
+    // Preferred: message first
+    // logger.error("Error during graceful shutdown", error)
+    // logger.info("Member added", { roomId })
+    if (typeof msgOrMeta === "string") {
+      const msg = msgOrMeta;
+      const obj = toMergingObject(maybeMetaOrMsg);
+      baseLogger[level](obj, msg);
+      return;
+    }
+
+    // Also support: object/error first
+    // logger.error(error, "Error during graceful shutdown")
+    // logger.info({ roomId }, "Member added")
+    const obj = toMergingObject(msgOrMeta);
+    const msg = typeof maybeMetaOrMsg === "string" ? maybeMetaOrMsg : undefined;
+
+    if (msg) {
+      baseLogger[level](obj, msg);
+    } else {
+      baseLogger[level](obj);
+    }
+  };
+};
+
+export const logger = {
+  info: createLogFn("info"),
+  error: createLogFn("error"),
+  warn: createLogFn("warn"),
+  debug: createLogFn("debug"),
+  child: baseLogger.child.bind(baseLogger),
+};
+
+
+================================================
+FILE: apps/worker/package.json
+================================================
+{
+  "name": "@job-platform/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@job-platform/shared-events": "*",
+    "@job-platform/shared-kafka": "*",
+    "@job-platform/shared-types": "*",
+    "@job-platform/shared-utils": "*",
+    "@prisma/client": "^7.10.0",
+    "bullmq": "^5.25.5",
+    "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1",
+    "pino": "^9.5.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "pino-pretty": "^11.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+
+================================================
+FILE: apps/worker/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext"
+  },
+  "include": ["src/**/*"],
+
+}
+
+
+================================================
+FILE: apps/worker/.env.example
+================================================
+NODE_ENV=development
+LOG_LEVEL=info
+WORKER_ID=worker-1
+WORKER_CAPABILITIES=SEND_EMAIL,GENERATE_REPORT
+DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
+REDIS_URL=redis://:jobplatform@localhost:6381
+KAFKA_BROKERS=localhost:9096
+KAFKA_CLIENT_ID=worker
+
+
+================================================
+FILE: apps/worker/src/server.ts
+================================================
+import { config } from "./config/index.js";
+import { logger } from "./config/logger.js";
+
+logger.info(
+  {
+    workerId: config.WORKER_ID,
+    capabilities: config.WORKER_CAPABILITIES,
+    env: config.NODE_ENV,
+  },
+  "Worker starting (Phase 0 â€“ skeleton, no processors yet)",
+);
+
+logger.info("Worker idle. Implement processors in Phase 2.");
+
+async function shutdown(signal: string) {
+  logger.info({ signal }, "Shutting down workerâ€¦");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+
+================================================
+FILE: apps/worker/src/config/index.ts
+================================================
+import "dotenv/config"
+import { z } from "zod";
+
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+    LOG_LEVEL: z.string().default("info"),
+    WORKER_ID: z.string().default(`worker-${process.pid}`),
+    WORKER_CAPABILITIES: z.string().default("SEND_EMAIL"),
+    DATABASE_URL: z.string().min(1),
+    REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
+    KAFKA_BROKER: z.string().default("localhost:9096"),
+    KAFKA_CLIENT_ID: z.string().default("worker"),
+  
+});
+
+const parsed = envSchema.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("Invalid environment variables:", parsed.error.flatten().fieldErrors);
+  process.exit(1);
+}
+
+export const config = {
+  ...parsed.data,
+  WORKER_CAPABILITIES: parsed.data.WORKER_CAPABILITIES.split(",").map((c) => c.trim()),
+  SERVICE_NAME: "worker",
+} as const;
+
+
+================================================
+FILE: apps/worker/src/config/logger.ts
+================================================
+import pino from "pino";
+import { config } from "./index.js";
+
+const baseLogger = pino({
+  level: config.NODE_ENV === "development" ? "debug" : "info",
+  ...(config.NODE_ENV === "development" && {
+    transport: {
+      target: "pino-pretty",
+      options: {
+        colorize: true,
+        translateTime: "SYS:standard",
+        ignore: "pid,hostname",
+      },
+    },
+  }),
+  base: {
+    service: config.SERVICE_NAME,
+  },
+});
+
+type LogMeta = Record<string, unknown> | Error | unknown;
+
+type LogFn = {
+  (msg: string, meta?: LogMeta): void;
+  (meta: LogMeta, msg?: string): void;
+};
+
+const toMergingObject = (meta?: LogMeta): Record<string, unknown> => {
+  if (meta === undefined || meta === null) {
+    return {};
+  }
+
+  if (meta instanceof Error) {
+    return {
+      err: {
+        message: meta.message,
+        name: meta.name,
+        stack: meta.stack,
+      },
+    };
+  }
+
+  if (typeof meta === "object") {
+    return meta as Record<string, unknown>;
+  }
+
+  // primitive (string/number/boolean) â€“ wrap it
+  return { value: meta };
+};
+
+const createLogFn = (level: "info" | "error" | "warn" | "debug"): LogFn => {
+  return (msgOrMeta: string | LogMeta, maybeMetaOrMsg?: string | LogMeta) => {
+    // Preferred: message first
+    // logger.error("Error during graceful shutdown", error)
+    // logger.info("Member added", { roomId })
+    if (typeof msgOrMeta === "string") {
+      const msg = msgOrMeta;
+      const obj = toMergingObject(maybeMetaOrMsg);
+      baseLogger[level](obj, msg);
+      return;
+    }
+
+    // Also support: object/error first
+    // logger.error(error, "Error during graceful shutdown")
+    // logger.info({ roomId }, "Member added")
+    const obj = toMergingObject(msgOrMeta);
+    const msg = typeof maybeMetaOrMsg === "string" ? maybeMetaOrMsg : undefined;
+
+    if (msg) {
+      baseLogger[level](obj, msg);
+    } else {
+      baseLogger[level](obj);
+    }
+  };
+};
+
+export const logger = {
+  info: createLogFn("info"),
+  error: createLogFn("error"),
+  warn: createLogFn("warn"),
+  debug: createLogFn("debug"),
+  child: baseLogger.child.bind(baseLogger),
+};
+
+
+================================================
+FILE: packages/shared-events/package.json
+================================================
+{
+  "name": "@job-platform/shared-events",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@job-platform/shared-types": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
+
+
+================================================
+FILE: packages/shared-events/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+  },
+  "include": ["src/**/*"],
+}
+
+
+================================================
+FILE: packages/shared-events/src/index.ts
+================================================
+export * from "./events/job.js";
+export * from "./events/worker.js";
+
+
+================================================
+FILE: packages/shared-events/src/events/job.ts
+================================================
+import type { JobPriority, JobStatus, JobType, Uuid } from "@job-platform/shared-types";
+
+export const JOB_EVENT_TYPES = {
+  CREATED: "job.created",
+  QUEUED: "job.queued",
+  STARTED: "job.started",
+  COMPLETED: "job.completed",
+  FAILED: "job.failed",
+  RETRYING: "job.retrying",
+  DEAD: "job.dead",
+  CANCELLED: "job.cancelled",
+  LEASE_EXPIRED: "job.lease_expired",
+  SCHEDULED: "job.scheduled",
+} as const;
+
+export type JobEventType = (typeof JOB_EVENT_TYPES)[keyof typeof JOB_EVENT_TYPES];
+
+export interface JobEventBase {
+  eventId: Uuid;
+  eventType: JobEventType;
+  occurredAt: string;
+  jobId: Uuid;
+  jobType: JobType | string;
+  tenantId?: string | null;
+}
+
+export interface JobCreatedEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.CREATED;
+  payload: {
+    status: JobStatus;
+    priority: JobPriority;
+    scheduledAt?: string | null;
+    idempotencyKey?: string | null;
+    maxAttempts: number;
+  };
+}
+
+export interface JobQueuedEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.QUEUED;
+  payload: {
+    status: JobStatus;
+    priority: JobPriority;
+  };
+}
+
+export interface JobStartedEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.STARTED;
+  payload: {
+    workerId: string;
+    attempt: number;
+    leaseExpiresAt: string;
+  };
+}
+
+export interface JobCompletedEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.COMPLETED;
+  payload: {
+    workerId: string;
+    attempt: number;
+    result?: Record<string, unknown> | null;
+    durationMs: number;
+  };
+}
+
+export interface JobFailedEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.FAILED;
+  payload: {
+    workerId?: string | null;
+    attempt: number;
+    error: string;
+    willRetry: boolean;
+  };
+}
+
+export interface JobRetryingEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.RETRYING;
+  payload: {
+    attempt: number;
+    nextAttemptAt: string;
+    error: string;
+  };
+}
+
+export interface JobDeadEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.DEAD;
+  payload: {
+    attempts: number;
+    lastError: string;
+  };
+}
+
+export interface JobCancelledEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.CANCELLED;
+  payload: {
+    reason?: string | null;
+  };
+}
+
+export interface JobLeaseExpiredEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.LEASE_EXPIRED;
+  payload: {
+    previousWorkerId: string;
+    leaseExpiredAt: string;
+  };
+}
+
+export interface JobScheduledEvent extends JobEventBase {
+  eventType: typeof JOB_EVENT_TYPES.SCHEDULED;
+  payload: {
+    scheduledAt: string;
+  };
+}
+
+export type JobDomainEvent =
+  | JobCreatedEvent
+  | JobQueuedEvent
+  | JobStartedEvent
+  | JobCompletedEvent
+  | JobFailedEvent
+  | JobRetryingEvent
+  | JobDeadEvent
+  | JobCancelledEvent
+  | JobLeaseExpiredEvent
+  | JobScheduledEvent;
+
+
+================================================
+FILE: packages/shared-events/src/events/worker.ts
+================================================
+import type { WorkerStatus } from "@job-platform/shared-types";
+export const WORKER_EVENT_TYPES = {
+  REGISTERED: "worker.registered",
+  HEARTBEAT: "worker.heartbeat",
+  OFFLINE: "worker.offline",
+  DRAINING: "worker.draining",
+} as const
+
+export type WorkerEventType = (typeof WORKER_EVENT_TYPES)[keyof typeof WORKER_EVENT_TYPES]
+
+export interface WorkerEventBase{
+  eventId: string;
+  eventType: WorkerEventType;
+  occurredAt: string
+  workerId:string
+}
+
+  export interface WorkerRegisteredEvent extends WorkerEventBase {
+    eventType: typeof WORKER_EVENT_TYPES.REGISTERED;
+    payload: {
+      capabilities: string[];
+      metadata?: Record<string, unknown>;
+    };
+  }
+export interface WorkerHeartbeatEvent extends WorkerEventBase {
+  eventType: typeof WORKER_EVENT_TYPES.HEARTBEAT;
+  payload: {
+    status: WorkerStatus;
+    activeJobs?: number;
+  };
+}
+export interface WorkerOfflineEvent extends WorkerEventBase {
+  eventType: typeof WORKER_EVENT_TYPES.OFFLINE;
+  payload: {
+    reason?: string;
+  };
+}
+
+export interface WorkerDrainingEvent extends WorkerEventBase {
+  eventType: typeof WORKER_EVENT_TYPES.DRAINING;
+  payload: {
+    remainingJobs: number;
+  };
+}
+
+export type WorkerDomainEvent =
+  | WorkerRegisteredEvent
+  | WorkerHeartbeatEvent
+  | WorkerOfflineEvent
+  | WorkerDrainingEvent;
+
+
+================================================
+FILE: packages/shared-kafka/package.json
+================================================
+{
+  "name": "@job-platform/shared-kafka",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "kafkajs": "^2.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+================================================
+FILE: packages/shared-kafka/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/shared-kafka/src/client.ts
+================================================
+import { Kafka, KafkaConfig, logLevel } from "kafkajs";
+
+export interface CreateKafkaClientOptions {
+  clientId: string;
+  brokers: string[];
+  logLevel?: logLevel;
+}
+
+export function createKafkaClient(options: CreateKafkaClientOptions): Kafka {
+  const config: KafkaConfig = {
+    brokers: options.brokers,
+    clientId: options.clientId,
+    logLevel: options.logLevel ?? logLevel.WARN,
+    retry: {
+      initialRetryTime: 300,
+      retries: 8,
+    },
+  };
+  return new Kafka(config);
+}
+
+
+
+================================================
+FILE: packages/shared-kafka/src/consumer.ts
+================================================
+import type {
+  Kafka,
+  Consumer,
+  EachMessagePayload,
+  ConsumerSubscribeTopics,
+} from "kafkajs";
+
+export type MessageHandler = (payload: EachMessagePayload) => Promise<void>;
+
+export class KafkaConsumer {
+  private consumer: Consumer;
+  private connected = false;
+
+  constructor(
+    kafka: Kafka,
+    private readonly groupId: string,
+  ) {
+    this.consumer = kafka.consumer({
+      groupId: this.groupId,
+      sessionTimeout: 30_000,
+      heartbeatInterval: 3_000,
+    });
+  }
+
+  async connect(): Promise<void> {
+    if (this.connected) return;
+    await this.consumer.connect();
+    this.connected = true;
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.connected) return;
+    await this.consumer.disconnect();
+    this.connected = false;
+  }
+
+  async subscribe(topics: ConsumerSubscribeTopics): Promise<void> {
+    if (!this.connected) await this.connect();
+    await this.consumer.subscribe(topics);
+  }
+
+  async run(handler: MessageHandler): Promise<void> {
+    if (!this.connected) await this.connect();
+    await this.consumer.run({ eachMessage: handler });
+  }
+}
+
+
+================================================
+FILE: packages/shared-kafka/src/index.ts
+================================================
+export { createKafkaClient } from "./client.js";
+export type { CreateKafkaClientOptions } from "./client.js";
+export { KafkaProducer } from "./producer.js";
+export { KafkaConsumer } from "./consumer.js";
+export type { MessageHandler } from "./consumer.js";
+export { TOPICS } from "./topics.js";
+export type { TopicName } from "./topics.js";
+
+
+================================================
+FILE: packages/shared-kafka/src/producer.ts
+================================================
+import type { Kafka, Producer, ProducerRecord, RecordMetadata } from "kafkajs";
+
+export class KafkaProducer {
+  private producer: Producer;
+  private connected = false;
+
+  constructor(kafka: Kafka) {
+    this.producer = kafka.producer({
+      allowAutoTopicCreation: true,
+      idempotent: true,
+    });
+  }
+
+  async connect(): Promise<void> {
+    if (this.connected) return;
+    await this.producer.connect();
+    this.connected = true;
+  }
+
+  async disconnect(): Promise<void> {
+    if (!this.connected) return;
+    await this.producer.disconnect();
+    this.connected = false;
+  }
+
+  async send(record: ProducerRecord): Promise<RecordMetadata[]> {
+    if (!this.connected) await this.connect();
+    return this.producer.send(record);
+  }
+
+  async sendBatch(records: ProducerRecord[]): Promise<RecordMetadata[]> {
+    if (!this.connected) await this.connect();
+    const result = await this.producer.sendBatch({ topicMessages: records });
+    return result.flat();
+  }
+}
+
+
+================================================
+FILE: packages/shared-kafka/src/topics.ts
+================================================
+export const TOPICS = {
+  JOB_EVENTS: "job.events",
+  WORKER_EVENTS: "worker.events",
+} as const;
+
+export type TopicName = (typeof TOPICS)[keyof typeof TOPICS];
+
+
+================================================
+FILE: packages/shared-types/package.json
+================================================
+{
+  "name": "@job-platform/shared-types",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
+
+
+================================================
+FILE: packages/shared-types/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/shared-types/src/index.ts
+================================================
+export type Uuid = string & { readonly _brand: "Uuid" }
+
+export type ApiResponse<T> = {
+  success: true;
+  data: T;
+  meta?: Record<string, unknown>;
+};
+
+export type ApiErrorResponse = {
+  success: false;
+  error: {
+    code: string;
+    message: string;
+    details?:unknown
+  }
+}
+
+export enum JobStatus{
+  PENDING = "PENDING",
+  SCHEDULED = "SCHEDULED",
+  QUEUED = "QUEUED",
+    RUNNING = "RUNNING",
+    COMPLETED = "COMPLETED",
+    FAILED = "FAILED",
+    RETRYING = "RETRYING",
+    DEAD = "DEAD",
+    CANCELLED = "CANCELLED",
+}
+
+export enum JobPriority{
+  LOW = "LOW",
+  MEDIUM = "MEDIUM",
+  HIGH = "HIGH",
+}
+
+export enum JobType{
+  SEND_EMAIL = "SEND_EMAIL",
+    GENERATE_REPORT = "GENERATE_REPORT",
+    PROCESS_WEBHOOK = "PROCESS_WEBHOOK",
+    CLEANUP = "CLEANUP",
+}
+
+export interface JobPayload{
+  [key:string]:unknown
+}
+
+export interface JobResult {
+  [key: string]: unknown;
+}
+
+
+export interface Job {
+  id: Uuid;
+  type: JobType | string;
+  status: JobStatus;
+  priority: JobPriority;
+  payload: JobPayload;
+  result?: JobResult | null;
+  error?: string | null;
+  attempts: number;
+  maxAttempts: number;
+  leaseOwner?: string | null;
+  leaseExpiresAt?: Date | null;
+  scheduledAt?: Date | null;
+  idempotencyKey?: string | null;
+  tenantId?: string | null;
+  cancelRequested: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  startedAt?: Date | null;
+  completedAt?: Date | null;
+}
+
+export enum WorkerStatus {
+  ONLINE = "ONLINE",
+  OFFLINE = "OFFLINE",
+  DRAINING = "DRAINING",
+}
+
+export interface WorkerInfo{
+  id: string;
+    capabilities: string[];
+    status: WorkerStatus;
+    lastHeartbeatAt: Date;
+    registeredAt: Date;
+    metadata?: Record<string, unknown>;
+}
+
+export interface PaginationParams {
+  page?: number;
+  limit?: number;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+}
+
+
+================================================
+FILE: packages/shared-utils/package.json
+================================================
+{
+  "name": "@job-platform/shared-utils",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@job-platform/shared-types": "*",
+    "uuid": "^11.0.3"
+  },
+  "peerDependencies": {
+    "express": ">=4"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+================================================
+FILE: packages/shared-utils/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/shared-utils/src/asyncHandler.ts
+================================================
+import type { Request, Response, NextFunction, RequestHandler } from "express";
+
+export function asyncHandler(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<unknown>,
+): RequestHandler {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+}
+
+
+================================================
+FILE: packages/shared-utils/src/errors.ts
+================================================
+export class AppError extends Error {
+  constructor(
+    public readonly code: string,
+    message: string,
+    public readonly statusCode: number = 500,
+    public readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = "AppError";
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+export class NotFoundError extends AppError {
+  constructor(resource: string, id?: string) {
+    super(
+      "NOT_FOUND",
+      id ? `${resource} with id ${id} not found` : `${resource} not found`,
+      404,
+    );
+    this.name = "NotFoundError";
+  }
+}
+
+export class ValidationError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super("VALIDATION_ERROR", message, 400, details);
+    this.name = "ValidationError";
+  }
+}
+
+export class ConflictError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super("CONFLICT", message, 409, details);
+    this.name = "ConflictError";
+  }
+}
+
+export class InvalidStateTransitionError extends AppError {
+  constructor(from: string, to: string) {
+    super(
+      "INVALID_STATE_TRANSITION",
+      `Cannot transition job from ${from} to ${to}`,
+      409,
+    );
+    this.name = "InvalidStateTransitionError";
+  }
+}
+
+export class RetryableError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super("RETRYABLE", message, 503, details);
+    this.name = "RetryableError";
+  }
+}
+
+export class PermanentError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super("PERMANENT", message, 422, details);
+    this.name = "PermanentError";
+  }
+}
+
+
+================================================
+FILE: packages/shared-utils/src/index.ts
+================================================
+export * from "./errors.js";
+export { asyncHandler } from "./asyncHandler.js";
+
+import { v4 as uuidv4 } from "uuid";
+import type { Uuid } from "@job-platform/shared-types";
+
+export function generateId(): Uuid {
+  return uuidv4() as Uuid;
+}
+
+export function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function calculateBackoffMs(
+  attempt: number,
+  baseMs = 1000,
+  capMs = 60_000,
+): number {
+  const exp = Math.min(capMs, baseMs * Math.pow(2, attempt));
+  return Math.floor(Math.random() * exp);
+}
+

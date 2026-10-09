@@ -1,0 +1,33 @@
+{
+  "name": "job-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-style Distributed Job Platform (Postgres source of truth + BullMQ + Kafka + Outbox)",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:job-service": "npm run dev -w @job-platform/job-service",
+    "dev:worker": "npm run dev -w @job-platform/worker",
+    "dev:scheduler": "npm run dev -w @job-platform/scheduler",
+    "dev:reaper": "npm run dev -w @job-platform/reaper",
+    "build:packages": "npm run build -w @job-platform/shared-types && npm run build -w @job-platform/shared-events && npm run build -w @job-platform/shared-kafka && npm run build -w @job-platform/shared-utils",
+    "db:generate": "npm run prisma:generate -w @job-platform/job-service",
+    "db:migrate": "npm run prisma:migrate -w @job-platform/job-service",
+    "db:studio": "npm run prisma:studio -w @job-platform/job-service",
+    "docker:up": "docker compose up -d",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f",
+    "lint": "npm run lint --workspaces --if-present",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist packages/*/dist"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "prisma": "^7.10.0"
+  }
+}

@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+
+}
+
+enum JobStatus{
+PENDING
+SCHEDULED
+QUEUED
+RUNNING
+COMPLETED
+FAILED
+RETRYING
+DEAD
+CANCELLED
+}
+enum JobPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Job{
+id             String @id @default(uuid())
+type           String
+priority       JobPriority  @default(MEDIUM)
+status         JobStatus
+payload        Json
+result         Json?
+error          String?
+attempts       Int          @default(0)
+maxAttempts    Int           @default(3)
+leaseOwner     String?
+leaseExpiresAt  DateTime?
+scheduledAt      DateTime?
+idempotencyKey    String?
+tenantId        String?
+  cancelRequested Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  @@unique([idempotencyKey])
+    @@index([status])
+    @@index([status, scheduledAt])
+    @@index([leaseExpiresAt])
+    @@index([status, priority, createdAt])
+    @@index([tenantId])
+    @@map("jobs")
+}
+
+model Outbox{
+id            String        @id @default(uuid())
+eventId        String       @unique
+eventType       String
+topic            String
+payload           Json
+createdAt          DateTime    @default(now())
+publishedAt          DateTime?
+
+
+@@index([publishedAt, createdAt])
+  @@map("outbox")
+
+}
