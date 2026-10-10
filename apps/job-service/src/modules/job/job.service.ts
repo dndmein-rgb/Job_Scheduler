@@ -12,6 +12,7 @@ import type {
 } from "./job.types.js";
 import { initialStatusForCreate } from "./job.state-machine.js";
 import { logger } from "../../config/logger.js";
+import { enqueueJob } from "../../infrastructure/bullmq.js";
 
 export class JobService {
   constructor(private readonly repo: JobInterface) {}
@@ -76,6 +77,17 @@ export class JobService {
       status: job.status,
       type: job.type,
     });
+    if (job.status === "QUEUED") {
+      try {
+        await enqueueJob(job.id)
+      } catch (err) {
+        // Job is durable in DB; missing queue message is recoverable later
+            logger.error("Failed to enqueue job (DB row exists as QUEUED)", {
+              jobId: job.id,
+              err,
+            });
+      }
+    }
 
     return job;
   }

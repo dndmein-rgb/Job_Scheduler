@@ -7,11 +7,8 @@ Directory structure:
     ├── apps/
     │   ├── job-service/
     │   │   ├── package.json
-    │   │   ├── prisma.config.ts
     │   │   ├── tsconfig.json
     │   │   ├── .env.example
-    │   │   ├── prisma/
-    │   │   │   └── schema.prisma
     │   │   └── src/
     │   │       ├── app.ts
     │   │       ├── server.ts
@@ -50,9 +47,15 @@ Directory structure:
     │   │   ├── .env.example
     │   │   └── src/
     │   │       ├── server.ts
-    │   │       └── config/
-    │   │           ├── index.ts
-    │   │           └── logger.ts
+    │   │       ├── config/
+    │   │       │   ├── index.ts
+    │   │       │   └── logger.ts
+    │   │       ├── infrastructure/
+    │   │       │   ├── bullmq.ts
+    │   │       │   ├── prisma.ts
+    │   │       │   └── redis.ts
+    │   │       └── services/
+    │   │           └── reaper.service.ts
     │   ├── scheduler/
     │   │   ├── package.json
     │   │   ├── tsconfig.json
@@ -68,10 +71,29 @@ Directory structure:
     │       ├── .env.example
     │       └── src/
     │           ├── server.ts
-    │           └── config/
-    │               ├── index.ts
-    │               └── logger.ts
+    │           ├── config/
+    │           │   ├── index.ts
+    │           │   └── logger.ts
+    │           ├── infrastructure/
+    │           │   ├── prisma.ts
+    │           │   └── redis.ts
+    │           ├── processors/
+    │           │   ├── index.ts
+    │           │   └── send-email.processor.ts
+    │           └── services/
+    │               ├── job-lifecycle.service.ts
+    │               ├── lease-heartbeat.ts
+    │               └── state-machine.ts
     └── packages/
+        ├── database/
+        │   ├── package.json
+        │   ├── prisma.config.ts
+        │   ├── tsconfig.json
+        │   ├── prisma/
+        │   │   └── schema.prisma
+        │   └── src/
+        │       ├── client.ts
+        │       └── index.ts
         ├── shared-events/
         │   ├── package.json
         │   ├── tsconfig.json
@@ -242,10 +264,10 @@ FILE: package.json
     "dev:worker": "npm run dev -w @job-platform/worker",
     "dev:scheduler": "npm run dev -w @job-platform/scheduler",
     "dev:reaper": "npm run dev -w @job-platform/reaper",
-    "build:packages": "npm run build -w @job-platform/shared-types && npm run build -w @job-platform/shared-events && npm run build -w @job-platform/shared-kafka && npm run build -w @job-platform/shared-utils",
-    "db:generate": "npm run prisma:generate -w @job-platform/job-service",
-    "db:migrate": "npm run prisma:migrate -w @job-platform/job-service",
-    "db:studio": "npm run prisma:studio -w @job-platform/job-service",
+    "build:packages": "npm run build -w @job-platform/shared-types && npm run build -w @job-platform/shared-events && npm run build -w @job-platform/shared-kafka && npm run build -w @job-platform/shared-utils && npm run build -w @job-platform/database",
+    "db:generate": "npm run generate -w @job-platform/database",
+    "db:migrate": "npm run migrate -w @job-platform/database",
+    "db:studio": "npm run prisma:studio -w @job-platform/database",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
@@ -327,6 +349,7 @@ FILE: apps/job-service/package.json
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@job-platform/database": "*",
     "@job-platform/shared-events": "*",
     "@job-platform/shared-kafka": "*",
     "@job-platform/shared-types": "*",
@@ -355,23 +378,6 @@ FILE: apps/job-service/package.json
   }
 }
 
-
-
-================================================
-FILE: apps/job-service/prisma.config.ts
-================================================
-import "dotenv/config";
-import { defineConfig } from "prisma/config";
-
-export default defineConfig({
-  schema: "prisma/schema.prisma",
-  migrations: {
-    path: "prisma/migrations",
-  },
-  datasource: {
-    url: process.env["DATABASE_URL"],
-  },
-});
 
 
 ================================================
@@ -406,83 +412,6 @@ CLIENT_ORIGINS=http://localhost:3000
 
 
 ================================================
-FILE: apps/job-service/prisma/schema.prisma
-================================================
-generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
-}
-
-datasource db {
-  provider = "postgresql"
-
-}
-
-enum JobStatus{
-PENDING
-SCHEDULED
-QUEUED
-RUNNING
-COMPLETED
-FAILED
-RETRYING
-DEAD
-CANCELLED
-}
-enum JobPriority {
-  LOW
-  MEDIUM
-  HIGH
-}
-
-model Job{
-id             String @id @default(uuid())
-type           String
-priority       JobPriority  @default(MEDIUM)
-status         JobStatus
-payload        Json
-result         Json?
-error          String?
-attempts       Int          @default(0)
-maxAttempts    Int           @default(3)
-leaseOwner     String?
-leaseExpiresAt  DateTime?
-scheduledAt      DateTime?
-idempotencyKey    String?
-tenantId        String?
-  cancelRequested Boolean     @default(false)
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
-  startedAt       DateTime?
-  completedAt     DateTime?
-
-  @@unique([idempotencyKey])
-    @@index([status])
-    @@index([status, scheduledAt])
-    @@index([leaseExpiresAt])
-    @@index([status, priority, createdAt])
-    @@index([tenantId])
-    @@map("jobs")
-}
-
-model Outbox{
-id            String        @id @default(uuid())
-eventId        String       @unique
-eventType       String
-topic            String
-payload           Json
-createdAt          DateTime    @default(now())
-publishedAt          DateTime?
-
-
-@@index([publishedAt, createdAt])
-  @@map("outbox")
-
-}
-
-
-
-================================================
 FILE: apps/job-service/src/app.ts
 ================================================
 import express from "express";
@@ -490,7 +419,9 @@ import helmet from "helmet";
 import { corsMiddleware } from "./middlewares/cors.middleware.js";
 import { requestLogger } from "./middlewares/req.middleware.js";
 import { errorMiddleware } from "./middlewares/error.middleware.js";
+
 import healthRoutes from "./modules/health/health.route.js";
+import jobRoutes from "./modules/job/job.route.js";
 
 export function createApp() {
   const app = express();
@@ -501,6 +432,7 @@ export function createApp() {
   app.use(requestLogger);
 
   app.use(healthRoutes);
+  app.use("/jobs", jobRoutes);
 
   app.use((_req, res) => {
     res.status(404).json({
@@ -693,8 +625,13 @@ import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
 
 export const JOB_QUEUE_NAME = "jobs";
+export const JOB_PROCESS_NAME = "process";
 
-export const jobQueue = new Queue(JOB_QUEUE_NAME, {
+export type QueueJobData = {
+  jobId: string;
+};
+
+export const jobQueue = new Queue<QueueJobData>(JOB_QUEUE_NAME, {
   connection: redis,
   defaultJobOptions: {
     removeOnComplete: { count: 1000 },
@@ -704,13 +641,26 @@ export const jobQueue = new Queue(JOB_QUEUE_NAME, {
 });
 
 jobQueue.on("error", (err) => {
-  logger.error("BullMQ queue error",{err})
-})
+  logger.error("BullMQ queue error", { err });
+});
+
+export async function enqueueJob(jobId: string): Promise<void> {
+  await jobQueue.add(
+    JOB_PROCESS_NAME,
+    { jobId },
+    {
+      // stable id â†’ at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
+      jobId,
+    },
+  );
+  logger.info("Enqueued job to BullMQ", { jobId });
+}
 
 export async function closeJobQueue(): Promise<void> {
   await jobQueue.close();
   logger.info("BullMQ job queue closed");
 }
+
 
 
 ================================================
@@ -829,7 +779,7 @@ export const outboxPublisher = new OutboxPublisher();
 FILE: apps/job-service/src/infrastructure/prisma.ts
 ================================================
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "@job-platform/database";
 import { config } from "../config/index.js";
 import pg from "pg";
 import { logger } from "../config/logger.js";
@@ -866,7 +816,7 @@ export type {
   JobStatus,
   JobPriority,
   Prisma,
-} from "../generated/prisma/client.js";
+} from "@job-platform/database";
 
 
 ================================================
@@ -1160,20 +1110,12 @@ FILE: apps/job-service/src/modules/job/job.controller.ts
 ================================================
 import { asyncHandler } from "@job-platform/shared-utils";
 import type{Request,Response} from 'express'
-import { CreateJobBody, ListJobsQuery } from "./job.schema.js";
+import { CreateJobInput, ListJobsQuery } from "./job.schema.js";
 import { jobService } from "./job.container.js";
 
 export const create = asyncHandler(async (req:Request,res:Response) => {
-  const body = req.body as CreateJobBody;
-  const job = await jobService.create({
-    type: body.type,
-          payload: body.payload,
-          priority: body.priority,
-          maxAttempts: body.maxAttempts,
-          scheduledAt: body.scheduledAt ?? undefined,
-          idempotencyKey: body.idempotencyKey,
-          tenantId: body.tenantId,
-  })
+  const body = req.body as CreateJobInput;
+  const job = await jobService.create(body)
   res.status(201).json({ success: true, data: job });
 })
 
@@ -1210,15 +1152,14 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
 FILE: apps/job-service/src/modules/job/job.interface.ts
 ================================================
 import { Job, type Prisma } from "../../infrastructure/prisma.js";
-import { CreateJobInput, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
+import { CreateJobWriteData, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
 
 export interface JobInterface {
   findById(id: string): Promise<Job | null>;
   findByIdempotencyKey(key: string): Promise<Job | null>;
   createWithOutbox(
-    input: CreateJobInput,
+    data: CreateJobWriteData,
     events: OutboxEventInput[],
-    jobId?:string
   ): Promise<Job>;
 
   list(filter: ListJobsFilter): Promise<ListJobsResult>
@@ -1237,9 +1178,8 @@ FILE: apps/job-service/src/modules/job/job.repository.ts
 import { generateId } from "@job-platform/shared-utils";
 import { Job, Prisma, prisma } from "../../infrastructure/prisma.js";
 import { JobInterface } from "./job.interface.js";
-import { initialStatusForCreate } from "./job.state-machine.js";
 import {
-  CreateJobInput,
+  CreateJobWriteData,
   ListJobsFilter,
   ListJobsResult,
   OutboxEventInput,
@@ -1261,24 +1201,22 @@ export class JobRepository implements JobInterface {
    * Why one transaction? Outbox pattern â€” no dual-write with Kafka.
    */
   async createWithOutbox(
-    input: CreateJobInput,
+    data: CreateJobWriteData,
     events: OutboxEventInput[],
-    jobId?:string
   ): Promise<Job> {
-    const status = initialStatusForCreate(input.scheduledAt ?? null);
-    const id = jobId ?? generateId();
+    
     return prisma.$transaction(async (tx) => {
       const job = await tx.job.create({
         data: {
-          id,
-          type: input.type,
-          status,
-          priority: input.priority ?? "MEDIUM",
-          payload: input.payload,
-          maxAttempts: input.maxAttempts??3,
-          scheduledAt: input.scheduledAt,
-          idempotencyKey: input.idempotencyKey ?? null,
-          tenantId: input.tenantId ?? null,
+          id:data.id,
+          type: data.type,
+          status:data.status,
+          priority: data.priority ?? "MEDIUM",
+          payload: data.payload,
+          maxAttempts: data.maxAttempts??3,
+          scheduledAt: data.scheduledAt,
+          idempotencyKey: data.idempotencyKey ?? null,
+          tenantId: data.tenantId ?? null,
           attempts: 0,
           cancelRequested: false,
         },
@@ -1406,7 +1344,8 @@ export const createJobBodySchema = z.object({
   tenantId: z.string().min(1).max(128).optional().nullable(),
 });
 
-export type CreateJobBody = z.infer<typeof createJobBodySchema>;
+export type CreateJobInput = z.infer<typeof createJobBodySchema>;
+
 export const listJobsQuerySchema = z.object({
   status: z.nativeEnum(JobStatus).optional(),
   type: z.string().min(1).optional(),
@@ -1425,117 +1364,108 @@ export const jobIdParamsSchema = z.object({
 ================================================
 FILE: apps/job-service/src/modules/job/job.service.ts
 ================================================
-import { JobInterface } from "./job.interface.js";
-import { CreateJobInput, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
-import { logger } from "../../config/logger.js";
-import { initialStatusForCreate } from "./job.state-machine.js";
 import { generateId, NotFoundError } from "@job-platform/shared-utils";
 import { JOB_EVENT_TYPES } from "@job-platform/shared-events";
 import { TOPICS } from "@job-platform/shared-kafka";
-import type{ Job } from "../../infrastructure/prisma.js";
+import type { Job, Prisma } from "../../infrastructure/prisma.js";
+import type { JobInterface } from "./job.interface.js";
+import type { CreateJobInput } from "./job.schema.js";
+import type {
+  CreateJobWriteData,
+  ListJobsFilter,
+  ListJobsResult,
+  OutboxEventInput,
+} from "./job.types.js";
+import { initialStatusForCreate } from "./job.state-machine.js";
+import { logger } from "../../config/logger.js";
+import { enqueueJob } from "../../infrastructure/bullmq.js";
 
-export class JobService{
-  constructor(private readonly repo: JobInterface) { }
-  async create(input: CreateJobInput): Promise<Job>{
+export class JobService {
+  constructor(private readonly repo: JobInterface) {}
+
+  async create(input: CreateJobInput): Promise<Job> {
     if (input.idempotencyKey) {
       const existing = await this.repo.findByIdempotencyKey(input.idempotencyKey);
       if (existing) {
         logger.info("Idempotent create â€“ returning existing job", {
-                  jobId: existing.id,
-                  idempotencyKey: input.idempotencyKey,
-                });
-                return existing;
+          jobId: existing.id,
+          idempotencyKey: input.idempotencyKey,
+        });
+        return existing;
       }
     }
-    const status = initialStatusForCreate(input.scheduledAt);
+
+    const id = generateId();
+    const status = initialStatusForCreate(input.scheduledAt ?? null);
+    const priority = input.priority ?? "MEDIUM";
+    const maxAttempts = input.maxAttempts ?? 3;
     const eventId = generateId();
-    const jobId = generateId();
-    const events = this.buildCreatedEvents({
-      jobId,
-            type: input.type,
+
+    const write: CreateJobWriteData = {
+      id,
+      type: input.type,
+      status,
+      priority,
+      payload: input.payload as Prisma.InputJsonValue,
+      maxAttempts,
+      scheduledAt: input.scheduledAt ?? null,
+      idempotencyKey: input.idempotencyKey ?? null,
+      tenantId: input.tenantId ?? null,
+    };
+
+    const events: OutboxEventInput[] = [
+      {
+        eventId,
+        eventType: JOB_EVENT_TYPES.CREATED,
+        topic: TOPICS.JOB_EVENTS,
+        payload: {
+          eventId,
+          eventType: JOB_EVENT_TYPES.CREATED,
+          occurredAt: new Date().toISOString(),
+          jobId: id,
+          jobType: input.type,
+          tenantId: input.tenantId ?? null,
+          payload: {
             status,
-            priority: input.priority ?? "MEDIUM",
-            scheduledAt: input.scheduledAt ?? null,
+            priority,
+            scheduledAt: input.scheduledAt?.toISOString() ?? null,
             idempotencyKey: input.idempotencyKey ?? null,
-            maxAttempts: input.maxAttempts ?? 3,
-            tenantId: input.tenantId ?? null,
-            eventId,
-    })
-    const job=await this.repo.createWithOutbox({...input},events,jobId)
-    logger.info("Job created", { jobId: job.id, status: job.status, type: job.type });
-        return job;
+            maxAttempts,
+          },
+        },
+      },
+    ];
+
+    const job = await this.repo.createWithOutbox(write, events);
+
+    logger.info("Job created", {
+      jobId: job.id,
+      status: job.status,
+      type: job.type,
+    });
+    if (job.status === "QUEUED") {
+      try {
+        await enqueueJob(job.id)
+      } catch (err) {
+        // Job is durable in DB; missing queue message is recoverable later
+            logger.error("Failed to enqueue job (DB row exists as QUEUED)", {
+              jobId: job.id,
+              err,
+            });
+      }
+    }
+
+    return job;
   }
 
   async getById(id: string): Promise<Job> {
-      const job = await this.repo.findById(id);
-      if (!job) {
-        throw new NotFoundError("Job", id);
-      }
-      return job;
-    }
-  
-    async list(filter: ListJobsFilter): Promise<ListJobsResult> {
-      return this.repo.list(filter);
-    }
-  private buildCreatedEvents(args: {
-    jobId: string;
-    type: string;
-    status: string;
-    priority: string;
-    scheduledAt: Date | null;
-    idempotencyKey: string | null;
-        maxAttempts: number;
-        tenantId: string | null;
-        eventId: string;
-  }): OutboxEventInput[]{
-    const occurredAt = new Date().toISOString();
-    const base = {
-      eventId: args.eventId,
-      occurredAt,
-      jobId: args.jobId,
-      jobType: args.type,
-      tenantId:args.tenantId
-    }
-    const created: OutboxEventInput = {
-          eventId: args.eventId,
-          eventType: JOB_EVENT_TYPES.CREATED,
-          topic: TOPICS.JOB_EVENTS,
-          payload: {
-            ...base,
-            eventType: JOB_EVENT_TYPES.CREATED,
-            payload: {
-              status: args.status,
-              priority: args.priority,
-              scheduledAt: args.scheduledAt?.toISOString() ?? null,
-              idempotencyKey: args.idempotencyKey,
-              maxAttempts: args.maxAttempts,
-            },
-          },
-        };
+    const job = await this.repo.findById(id);
+    if (!job) throw new NotFoundError("Job", id);
+    return job;
+  }
 
-    // Optional second event for clarity in Kafka UI
-        const followUpType =
-          args.status === "SCHEDULED"
-            ? JOB_EVENT_TYPES.SCHEDULED
-            : JOB_EVENT_TYPES.QUEUED;
-        const followUp: OutboxEventInput = {
-              eventId: generateId(),
-              eventType: followUpType,
-              topic: TOPICS.JOB_EVENTS,
-              payload: {
-                ...base,
-                eventId: undefined, // set below
-                eventType: followUpType,
-                payload:
-                  followUpType === JOB_EVENT_TYPES.SCHEDULED
-                    ? { scheduledAt: args.scheduledAt!.toISOString() }
-                    : { status: args.status, priority: args.priority },
-              },
-            };
-            // fix eventId on payload
-            (followUp.payload as { eventId: string }).eventId = followUp.eventId;
-        
-            return [created, followUp];
+  async list(filter: ListJobsFilter): Promise<ListJobsResult> {
+    return this.repo.list(filter);
   }
 }
 
@@ -1551,36 +1481,40 @@ FILE: apps/job-service/src/modules/job/job.state-machine.ts
 import { JobStatus } from "@job-platform/shared-types";
 import { InvalidStateTransitionError } from "@job-platform/shared-utils";
 
-
-
-
 const ALLOWED_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
   PENDING: [JobStatus.QUEUED, JobStatus.SCHEDULED, JobStatus.CANCELLED],
   SCHEDULED: [JobStatus.QUEUED, JobStatus.CANCELLED],
   QUEUED: [JobStatus.RUNNING, JobStatus.CANCELLED],
-  RUNNING: [JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED],
-    FAILED: [JobStatus.RETRYING, JobStatus.DEAD],
-    RETRYING: [JobStatus.QUEUED],
-    COMPLETED: [],
-    DEAD: [],
-    CANCELLED: [],
+  RUNNING: [
+    JobStatus.COMPLETED,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+    JobStatus.QUEUED, // reaper lease recovery only
+  ],
+  FAILED: [JobStatus.RETRYING, JobStatus.DEAD],
+  RETRYING: [JobStatus.QUEUED],
+  COMPLETED: [],
+  DEAD: [],
+  CANCELLED: [],
+};
+
+export function canTransition(from: JobStatus, to: JobStatus): boolean {
+  return ALLOWED_TRANSITIONS[from].includes(to);
 }
 
-export function canTransition(from: JobStatus, to: JobStatus):boolean {
-  return ALLOWED_TRANSITIONS[from].includes(to)
-}
-
-export function assertTransition(from: JobStatus, to: JobStatus): void{
+export function assertTransition(from: JobStatus, to: JobStatus): void {
   if (!canTransition(from, to)) {
-      throw new InvalidStateTransitionError(from, to);
-    }
+    throw new InvalidStateTransitionError(from, to);
+  }
 }
 
-export function initialStatusForCreate(scheduledAT: Date | null | undefined): JobStatus{
+export function initialStatusForCreate(
+  scheduledAT: Date | null | undefined,
+): JobStatus {
   if (scheduledAT && scheduledAT.getTime() > Date.now()) {
-    return JobStatus.SCHEDULED
+    return JobStatus.SCHEDULED;
   }
-  return JobStatus.QUEUED
+  return JobStatus.QUEUED;
 }
 
 
@@ -1590,16 +1524,17 @@ FILE: apps/job-service/src/modules/job/job.types.ts
 ================================================
 import type { Job, JobPriority, JobStatus, Prisma } from "../../infrastructure/prisma.js";
 
-export type CreateJobInput = {
-  type:  string;
+export type CreateJobWriteData = {
+  id: string;
+  type: string;
+  status: JobStatus;
+  priority: JobPriority;
   payload: Prisma.InputJsonValue;
-  priority?: JobPriority;
-  maxAttempts?: number;
-  scheduledAt?: Date;
-  idempotencyKey?: string | null;
-  tenantId?:string|null
-}
-
+  maxAttempts: number;
+  scheduledAt: Date | null;
+  idempotencyKey: string | null;
+  tenantId: string | null;
+};
 export type ListJobsFilter = {
   status?: JobStatus;
   type?: string
@@ -1656,12 +1591,17 @@ FILE: apps/reaper/package.json
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@job-platform/database": "*",
     "@job-platform/shared-events": "*",
     "@job-platform/shared-kafka": "*",
     "@job-platform/shared-types": "*",
     "@job-platform/shared-utils": "*",
+    "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
+    "bullmq": "^5.25.5",
     "dotenv": "^16.4.5",
+    "ioredis": "^5.4.1",
+    "pg": "^8.23.0",
     "pino": "^9.5.0",
     "zod": "^3.23.8"
   },
@@ -1672,7 +1612,6 @@ FILE: apps/reaper/package.json
     "typescript": "^5.6.3"
   }
 }
-
 
 
 ================================================
@@ -1699,6 +1638,7 @@ LOG_LEVEL=info
 REAPER_POLL_INTERVAL_MS=5000
 LEASE_GRACE_MS=2000
 DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
+REDIS_URL=redis://:jobplatform@localhost:6381
 KAFKA_BROKER=localhost:9096
 KAFKA_CLIENT_ID=reaper
 
@@ -1708,42 +1648,64 @@ FILE: apps/reaper/src/server.ts
 ================================================
 import { config } from "./config/index.js";
 import { logger } from "./config/logger.js";
+import { reaperService } from "./services/reaper.service.js";
 
-logger.info(
-  {
-    pollIntervalMs: config.REAPER_POLL_INTERVAL_MS,
-    leaseGraceMs: config.LEASE_GRACE_MS,
-    env: config.NODE_ENV,
-  },
-  "Reaper starting (Phase 0 â€“ skeleton)",
-);
+logger.info("Reaper starting", {
+  pollIntervalMs: config.REAPER_POLL_INTERVAL_MS,
+  leaseGraceMs: config.LEASE_GRACE_MS,
+  env: config.NODE_ENV,
+});
 
-logger.info("Reaper idle. Implement lease recovery in Phase 3.");
+let timer: ReturnType<typeof setInterval> | null = null;
+let tickInFlight = false;
+
+async function tick() {
+  if (tickInFlight) return;
+  tickInFlight = true;
+  try {
+    const recovered = await reaperService.tick();
+    if (recovered > 0) {
+      logger.info("Reaper tick recovered jobs", { recovered });
+    }
+  } catch (err) {
+    logger.error("Reaper tick failed", { err });
+  } finally {
+    tickInFlight = false;
+  }
+}
+
+timer = setInterval(() => void tick(), config.REAPER_POLL_INTERVAL_MS);
+// Run once immediately so we don't wait a full interval after boot.
+void tick();
 
 async function shutdown(signal: string) {
-  logger.info({ signal }, "Shutting down reaperâ€¦");
+  logger.info("Shutting down reaperâ€¦", { signal });
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
   process.exit(0);
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 
 ================================================
 FILE: apps/reaper/src/config/index.ts
 ================================================
-import "dotenv/config"
+import "dotenv/config";
 import { z } from "zod";
 
-  const envSchema = z.object({
-    NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-    LOG_LEVEL: z.string().default("info"),
-    REAPER_POLL_INTERVAL_MS: z.coerce.number().default(5000),
-    LEASE_GRACE_MS: z.coerce.number().default(2000),
-    DATABASE_URL: z.string().min(1),
-    KAFKA_BROKER: z.string().default("localhost:9096"),
-    KAFKA_CLIENT_ID: z.string().default("reaper"),
-  
+const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
+  LOG_LEVEL: z.string().default("info"),
+  REAPER_POLL_INTERVAL_MS: z.coerce.number().default(5000),
+  LEASE_GRACE_MS: z.coerce.number().default(2000),
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
+  KAFKA_BROKER: z.string().default("localhost:9096"),
+  KAFKA_CLIENT_ID: z.string().default("reaper"),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -1845,6 +1807,203 @@ export const logger = {
   debug: createLogFn("debug"),
   child: baseLogger.child.bind(baseLogger),
 };
+
+
+================================================
+FILE: apps/reaper/src/infrastructure/bullmq.ts
+================================================
+import { Queue } from "bullmq";
+import { redis } from "./redis.js";
+import { logger } from "../config/logger.js";
+
+export const JOB_QUEUE_NAME = "jobs";
+export const JOB_PROCESS_NAME = "process";
+
+export type QueueJobData = { jobId: string };
+
+export const jobQueue = new Queue<QueueJobData>(JOB_QUEUE_NAME, {
+  connection: redis,
+  defaultJobOptions: {
+    removeOnComplete: { count: 1000 },
+    removeOnFail: { count: 5000 },
+    attempts: 1,
+  },
+});
+
+export async function enqueueJob(jobId: string): Promise<void> {
+  await jobQueue.add(
+    JOB_PROCESS_NAME,
+    { jobId },
+    { jobId }, // stable id â†’ BullMQ dedupe
+  );
+  logger.info("Reaper re-enqueued job", { jobId });
+}
+
+
+================================================
+FILE: apps/reaper/src/infrastructure/prisma.ts
+================================================
+import { createPrismaClient } from "@job-platform/database";
+import { config } from "../config/index.js";
+
+const globalForPrisma = globalThis as unknown as {
+  prisma?: ReturnType<typeof createPrismaClient>;
+};
+
+export const prisma =
+  globalForPrisma.prisma ??
+  createPrismaClient({
+    connectionString: config.DATABASE_URL,
+    log: config.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+  });
+
+if (config.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+
+export type { Job, JobStatus, Prisma } from "@job-platform/database";
+
+
+================================================
+FILE: apps/reaper/src/infrastructure/redis.ts
+================================================
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+const redis = new Redis(config.REDIS_URL, {
+  maxRetriesPerRequest: null,
+  enableReadyCheck: true,
+});
+
+redis.on("connect", () => logger.info("Redis TCP connection established"));
+redis.on("ready", () => logger.info("Redis client is ready"));
+redis.on("error", (err) => logger.error("Redis connection error", { err }));
+
+export { redis };
+
+
+================================================
+FILE: apps/reaper/src/services/reaper.service.ts
+================================================
+import { generateId } from "@job-platform/shared-utils";
+import { JOB_EVENT_TYPES } from "@job-platform/shared-events";
+import { TOPICS } from "@job-platform/shared-kafka";
+import { prisma } from "../infrastructure/prisma.js";
+import { enqueueJob } from "../infrastructure/bullmq.js";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+/**
+ * Recover jobs whose lease has expired.
+ *
+ * Why a grace period?
+ * A worker may be mid-renewal under DB/network pressure. We wait a little
+ * past leaseExpiresAt so we don't steal a live job.
+ *
+ * Transition: RUNNING â†’ QUEUED (allowed only for reaper path).
+ * We clear the lease and re-enqueue so another worker can claim it.
+ */
+export class ReaperService {
+  async tick(): Promise<number> {
+    const cutoff = new Date(Date.now() - config.LEASE_GRACE_MS);
+
+    const expired = await prisma.job.findMany({
+      where: {
+        status: "RUNNING",
+        leaseExpiresAt: { lt: cutoff },
+      },
+      take: 50,
+      orderBy: { leaseExpiresAt: "asc" },
+    });
+
+    if (expired.length === 0) return 0;
+
+    let recovered = 0;
+
+    for (const job of expired) {
+      try {
+        const eventId = generateId();
+        const previousWorkerId = job.leaseOwner ?? "unknown";
+        const leaseExpiredAt =
+          job.leaseExpiresAt?.toISOString() ?? new Date().toISOString();
+        // Returns true only when we actually won the race and wrote the outbox row.
+        const didRecover = await prisma.$transaction(async (tx) => {
+          // Optimistic: only recover if still RUNNING with the same expired lease.
+          const updated = await tx.job.updateMany({
+            where: {
+              id: job.id,
+              status: "RUNNING",
+              leaseExpiresAt: { lt: cutoff },
+            },
+            data: {
+              status: "QUEUED",
+              leaseOwner: null,
+              leaseExpiresAt: null,
+            },
+          });
+
+          if (updated.count === 0) {
+            // Lost the race (worker finished or another reaper instance).
+            return;
+          }
+
+          await tx.outbox.create({
+            data: {
+              id: generateId(),
+              eventId,
+              eventType: JOB_EVENT_TYPES.LEASE_EXPIRED,
+              topic: TOPICS.JOB_EVENTS,
+              payload: {
+                eventId,
+                eventType: JOB_EVENT_TYPES.LEASE_EXPIRED,
+                occurredAt: new Date().toISOString(),
+                jobId: job.id,
+                jobType: job.type,
+                tenantId: job.tenantId,
+                payload: {
+                  previousWorkerId,
+                  leaseExpiredAt,
+                },
+              },
+            },
+          });
+          return true;
+        });
+        if (!didRecover) {
+          // Someone else finished/reaped it â€” do not enqueue or count.
+          continue;
+        }
+        // Re-enqueue after the DB commit (same pattern as job-service create).
+        try {
+          await enqueueJob(job.id);
+        } catch (err) {
+          logger.error(
+            "Reaper: DB recovered but enqueue failed (job is QUEUED)",
+            {
+              jobId: job.id,
+              err,
+            },
+          );
+        }
+
+        recovered += 1;
+        logger.warn("Lease expired â€“ job requeued", {
+          jobId: job.id,
+          previousWorkerId,
+          leaseExpiredAt,
+        });
+      } catch (err) {
+        logger.error("Reaper failed to recover job", { jobId: job.id, err });
+      }
+    }
+
+    return recovered;
+  }
+}
+
+export const reaperService = new ReaperService();
+
 
 
 ================================================
@@ -2067,14 +2226,17 @@ FILE: apps/worker/package.json
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@job-platform/database": "*",
     "@job-platform/shared-events": "*",
     "@job-platform/shared-kafka": "*",
     "@job-platform/shared-types": "*",
     "@job-platform/shared-utils": "*",
+    "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "bullmq": "^5.25.5",
     "dotenv": "^16.4.5",
     "ioredis": "^5.4.1",
+    "pg": "^8.23.0",
     "pino": "^9.5.0",
     "zod": "^3.23.8"
   },
@@ -2085,7 +2247,6 @@ FILE: apps/worker/package.json
     "typescript": "^5.6.3"
   }
 }
-
 
 
 ================================================
@@ -2113,53 +2274,92 @@ WORKER_ID=worker-1
 WORKER_CAPABILITIES=SEND_EMAIL,GENERATE_REPORT
 DATABASE_URL=postgresql://jobplatform:jobplatform@localhost:5435/jobplatform?schema=public
 REDIS_URL=redis://:jobplatform@localhost:6381
-KAFKA_BROKERS=localhost:9096
+KAFKA_BROKER=localhost:9096
 KAFKA_CLIENT_ID=worker
+LEASE_MS=30000
 
 
 ================================================
 FILE: apps/worker/src/server.ts
 ================================================
+import { Worker } from "bullmq";
 import { config } from "./config/index.js";
 import { logger } from "./config/logger.js";
+import { redis } from "./infrastructure/redis.js";
+import { jobLifecycle } from "./services/job-lifecycle.service.js";
+import { getProcessor } from "./processors/index.js";
+import { startLeaseHeartbeat } from "./services/lease-heartbeat.js";
 
-logger.info(
-  {
-    workerId: config.WORKER_ID,
-    capabilities: config.WORKER_CAPABILITIES,
-    env: config.NODE_ENV,
+const JOB_QUEUE_NAME = "jobs";
+
+logger.info("Worker starting", {
+  workerId: config.WORKER_ID,
+  capabilities: config.WORKER_CAPABILITIES,
+  leaseMs: config.LEASE_MS,
+  env: config.NODE_ENV,
+});
+
+const worker = new Worker<{ jobId: string }>(
+  JOB_QUEUE_NAME,
+  async (bullJob) => {
+    const jobId = bullJob.data.jobId;
+    const t0 = Date.now();
+
+    const claimed = await jobLifecycle.claim(jobId);
+    // Start renewing the lease for the duration of this handler.
+        const stopHeartbeat = startLeaseHeartbeat(jobId);
+    try {
+      const processor = getProcessor(claimed.type);
+      const result = await processor(claimed.payload);
+      await jobLifecycle.complete(jobId, result, claimed.attempts, t0);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await jobLifecycle.fail(jobId, message, claimed.attempts);
+      // swallow: status already FAILED in Postgres; BullMQ attempts=1
+    } finally {
+      stopHeartbeat()
+    }
   },
-  "Worker starting (Phase 0 â€“ skeleton, no processors yet)",
+  {
+    connection: redis,
+    concurrency: 5,
+  },
 );
 
-logger.info("Worker idle. Implement processors in Phase 2.");
+worker.on("completed", (job) => {
+  logger.info("BullMQ job completed", { bullJobId: job.id });
+});
+
+worker.on("failed", (job, err) => {
+  logger.error("BullMQ job failed", { bullJobId: job?.id, err });
+});
 
 async function shutdown(signal: string) {
-  logger.info({ signal }, "Shutting down workerâ€¦");
+  logger.info("Shutting down workerâ€¦", { signal });
+  await worker.close();
   process.exit(0);
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 
 ================================================
 FILE: apps/worker/src/config/index.ts
 ================================================
-import "dotenv/config"
+import "dotenv/config";
 import { z } from "zod";
-
 
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-    LOG_LEVEL: z.string().default("info"),
-    WORKER_ID: z.string().default(`worker-${process.pid}`),
-    WORKER_CAPABILITIES: z.string().default("SEND_EMAIL"),
-    DATABASE_URL: z.string().min(1),
-    REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
-    KAFKA_BROKER: z.string().default("localhost:9096"),
-    KAFKA_CLIENT_ID: z.string().default("worker"),
-  
+  LOG_LEVEL: z.string().default("info"),
+  WORKER_ID: z.string().default(`worker-${process.pid}`),
+  WORKER_CAPABILITIES: z.string().default("SEND_EMAIL"),
+  DATABASE_URL: z.string().min(1),
+  REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
+  KAFKA_BROKER: z.string().default("localhost:9096"),
+  KAFKA_CLIENT_ID: z.string().default("worker"),
+  LEASE_MS: z.coerce.number().default(30_000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -2262,6 +2462,548 @@ export const logger = {
   debug: createLogFn("debug"),
   child: baseLogger.child.bind(baseLogger),
 };
+
+
+================================================
+FILE: apps/worker/src/infrastructure/prisma.ts
+================================================
+import { createPrismaClient } from "@job-platform/database";
+import { config } from "../config/index.js";
+
+const globalForPrisma = globalThis as unknown as {
+  prisma?: ReturnType<typeof createPrismaClient>;
+};
+
+export const prisma =
+  globalForPrisma.prisma ??
+  createPrismaClient({
+    connectionString: config.DATABASE_URL,
+    log: config.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+  });
+
+if (config.NODE_ENV !== "production") {
+  globalForPrisma.prisma = prisma;
+}
+
+export type { Job, JobStatus, Prisma } from "@job-platform/database";
+
+
+================================================
+FILE: apps/worker/src/infrastructure/redis.ts
+================================================
+import { Redis } from "ioredis";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+
+const redis = new Redis(config.REDIS_URL, {
+  maxRetriesPerRequest: null, // required by BullMQ
+  enableReadyCheck: true,
+});
+
+redis.on("connect", () => logger.info("Redis TCP connection established"));
+redis.on("ready", () => logger.info("Redis client is ready"));
+redis.on("error", (err) => logger.error("Redis connection error", { err }));
+
+export { redis };
+
+
+================================================
+FILE: apps/worker/src/processors/index.ts
+================================================
+import { sendEmailProcessor } from "./send-email.processor.js";
+
+type Processor = (payload: unknown) => Promise<Record<string, unknown>>;
+
+const registry: Record<string, Processor> = {
+  SEND_EMAIL: sendEmailProcessor,
+};
+
+export function getProcessor(type: string): Processor {
+  const p = registry[type];
+  if (!p) {
+    throw new Error(`No processor registered for job type: ${type}`);
+  }
+  return p;
+}
+
+
+================================================
+FILE: apps/worker/src/processors/send-email.processor.ts
+================================================
+import { sleep } from "@job-platform/shared-utils";
+import { logger } from "../config/logger.js";
+
+export async function sendEmailProcessor(payload: unknown): Promise<Record<string, unknown>>{
+  const data = payload as { to?: string; subject?: string };
+  
+    logger.info("SEND_EMAIL starting", { to: data.to, subject: data.subject });
+    await sleep(500);
+  
+    if (data.to === "fail@example.com") {
+      throw new Error("Simulated email failure");
+    }
+  
+    return {
+      sent: true,
+      to: data.to ?? null,
+      at: new Date().toISOString(),
+    };
+}
+
+
+================================================
+FILE: apps/worker/src/services/job-lifecycle.service.ts
+================================================
+import { generateId, NotFoundError } from "@job-platform/shared-utils";
+import { JOB_EVENT_TYPES } from "@job-platform/shared-events";
+import { TOPICS } from "@job-platform/shared-kafka";
+import { JobStatus } from "@job-platform/shared-types";
+import { Prisma, prisma } from "../infrastructure/prisma.js";
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+import { assertTransition } from "./state-machine.js";
+
+export class JobLifecycleService {
+  async claim(jobId: string) {
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) throw new NotFoundError("Job", jobId);
+
+    if (job.status !== "QUEUED" && job.status !== "RETRYING") {
+      logger.warn("Skip job â€“ not claimable", { jobId, status: job.status });
+      throw new Error(`Job not claimable: ${job.status}`);
+    }
+
+    assertTransition(job.status as JobStatus, JobStatus.RUNNING);
+
+    const attempts = job.attempts + 1;
+    const leaseExpiresAt = new Date(Date.now() + config.LEASE_MS);
+    const eventId = generateId();
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const u = await tx.job.update({
+        where: { id: jobId },
+        data: {
+          status: "RUNNING",
+          attempts,
+          leaseOwner: config.WORKER_ID,
+          leaseExpiresAt,
+          startedAt: job.startedAt ?? new Date(),
+        },
+      });
+
+      await tx.outbox.create({
+        data: {
+          id: generateId(),
+          eventId,
+          eventType: JOB_EVENT_TYPES.STARTED,
+          topic: TOPICS.JOB_EVENTS,
+          payload: {
+            eventId,
+            eventType: JOB_EVENT_TYPES.STARTED,
+            occurredAt: new Date().toISOString(),
+            jobId,
+            jobType: job.type,
+            tenantId: job.tenantId,
+            payload: {
+              workerId: config.WORKER_ID,
+              attempt: attempts,
+              leaseExpiresAt: leaseExpiresAt.toISOString(),
+            },
+          },
+        },
+      });
+
+      return u;
+    });
+
+    return {
+      id: updated.id,
+      type: updated.type,
+      payload: updated.payload,
+      attempts: updated.attempts,
+    };
+  }
+
+  async complete(
+    jobId: string,
+    result: Record<string, unknown>,
+    attempt: number,
+    startedAtMs: number,
+  ): Promise<void> {
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) return;
+
+    assertTransition(job.status as JobStatus, JobStatus.COMPLETED);
+    const eventId = generateId();
+    const durationMs = Date.now() - startedAtMs;
+    const resultJson = result as Prisma.InputJsonValue;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.job.update({
+        where: { id: jobId },
+        data: {
+          status: "COMPLETED",
+          result:resultJson,
+          error: null,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          completedAt: new Date(),
+        },
+      });
+
+      await tx.outbox.create({
+        data: {
+          id: generateId(),
+          eventId,
+          eventType: JOB_EVENT_TYPES.COMPLETED,
+          topic: TOPICS.JOB_EVENTS,
+          payload: {
+            eventId,
+            eventType: JOB_EVENT_TYPES.COMPLETED,
+            occurredAt: new Date().toISOString(),
+            jobId,
+            jobType: job.type,
+            tenantId: job.tenantId,
+            payload: {
+              workerId: config.WORKER_ID,
+              attempt,
+              resultJson,
+              durationMs,
+            },
+          },
+        },
+      });
+    });
+
+    logger.info("Job completed", { jobId, durationMs });
+  }
+
+  async fail(jobId: string, error: string, attempt: number): Promise<void> {
+    const job = await prisma.job.findUnique({ where: { id: jobId } });
+    if (!job) return;
+
+    assertTransition(job.status as JobStatus, JobStatus.FAILED);
+    const eventId = generateId();
+    const willRetry = attempt < job.maxAttempts;
+
+    await prisma.$transaction(async (tx) => {
+      await tx.job.update({
+        where: { id: jobId },
+        data: {
+          status: "FAILED",
+          error,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+        },
+      });
+
+      await tx.outbox.create({
+        data: {
+          id: generateId(),
+          eventId,
+          eventType: JOB_EVENT_TYPES.FAILED,
+          topic: TOPICS.JOB_EVENTS,
+          payload: {
+            eventId,
+            eventType: JOB_EVENT_TYPES.FAILED,
+            occurredAt: new Date().toISOString(),
+            jobId,
+            jobType: job.type,
+            tenantId: job.tenantId,
+            payload: {
+              workerId: config.WORKER_ID,
+              attempt,
+              error,
+              willRetry,
+            },
+          },
+        },
+      });
+    });
+
+    logger.warn("Job failed", { jobId, error, willRetry });
+  }
+}
+
+export const jobLifecycle = new JobLifecycleService();
+
+
+================================================
+FILE: apps/worker/src/services/lease-heartbeat.ts
+================================================
+/**
+ * Renews leaseExpiresAt while a job is still being processed.
+ * Why? If the worker dies, the reaper can reclaim after leaseExpiresAt.
+ * We renew at ~1/3 of LEASE_MS so a few missed ticks still leave a valid lease.
+ */
+
+import { config } from "../config/index.js";
+import { logger } from "../config/logger.js";
+import { prisma } from "../infrastructure/prisma.js";
+
+export function startLeaseHeartbeat(jobId: string): () => void {
+  const intervalMs = Math.max(1_000, Math.floor(config.LEASE_MS / 3));
+  const timer = setInterval(async () => {
+    try {
+      const nextExpiry = new Date(Date.now() + config.LEASE_MS);
+      const result = await prisma.job.updateMany({
+        where: { id: jobId, status: "RUNNING", leaseOwner: config.WORKER_ID },
+        data: {
+          leaseExpiresAt: nextExpiry,
+        },
+      });
+      if (result.count === 0) {
+        // Job was completed/failed/reaped â€” stop renewing.
+        logger.debug("Lease heartbeat: job no longer owned, stopping", {
+          jobId,
+        });
+        clearInterval(timer);
+        return;
+      }
+
+      logger.debug("Lease renewed", {
+        jobId,
+        leaseExpiresAt: nextExpiry.toISOString(),
+      });
+    } catch (err) {
+      logger.warn("Lease heartbeat failed", { jobId, err });
+      // Don't clear the timer â€” transient DB blips shouldn't stop renewal.
+    }
+  }, intervalMs);
+  // Return stop function so the caller can clean up when the job finishes.
+  return () => clearInterval(timer);
+}
+
+
+
+================================================
+FILE: apps/worker/src/services/state-machine.ts
+================================================
+import { JobStatus } from "@job-platform/shared-types";
+import { InvalidStateTransitionError } from "@job-platform/shared-utils";
+
+const ALLOWED: Record<JobStatus, readonly JobStatus[]> = {
+  PENDING: [JobStatus.QUEUED, JobStatus.SCHEDULED, JobStatus.CANCELLED],
+  SCHEDULED: [JobStatus.QUEUED, JobStatus.CANCELLED],
+  QUEUED: [JobStatus.RUNNING, JobStatus.CANCELLED],
+  RUNNING: [
+    JobStatus.COMPLETED,
+    JobStatus.FAILED,
+    JobStatus.CANCELLED,
+    JobStatus.QUEUED, // reaper lease recovery only
+  ],
+  FAILED: [JobStatus.RETRYING, JobStatus.DEAD],
+  RETRYING: [JobStatus.QUEUED],
+  COMPLETED: [],
+  DEAD: [],
+  CANCELLED: [],
+};
+
+export function assertTransition(from: JobStatus, to: JobStatus): void {
+  if (!ALLOWED[from].includes(to)) {
+    throw new InvalidStateTransitionError(from, to);
+  }
+}
+
+
+
+================================================
+FILE: packages/database/package.json
+================================================
+{
+  "name": "@job-platform/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev --name init",
+    "studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "prisma": "^7.10.0",
+    "typescript": "^5.6.3"
+  }
+}
+
+
+================================================
+FILE: packages/database/prisma.config.ts
+================================================
+import "dotenv/config";
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: {
+    path: "prisma/migrations",
+  },
+  datasource: {
+    url: process.env["DATABASE_URL"],
+  },
+});
+
+
+================================================
+FILE: packages/database/tsconfig.json
+================================================
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src"
+  },
+  "include": ["src/**/*"]
+}
+
+
+================================================
+FILE: packages/database/prisma/schema.prisma
+================================================
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+
+}
+
+enum JobStatus{
+PENDING
+SCHEDULED
+QUEUED
+RUNNING
+COMPLETED
+FAILED
+RETRYING
+DEAD
+CANCELLED
+}
+enum JobPriority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model Job{
+id             String @id @default(uuid())
+type           String
+priority       JobPriority  @default(MEDIUM)
+status         JobStatus
+payload        Json
+result         Json?
+error          String?
+attempts       Int          @default(0)
+maxAttempts    Int           @default(3)
+leaseOwner     String?
+leaseExpiresAt  DateTime?
+scheduledAt      DateTime?
+idempotencyKey    String?
+tenantId        String?
+  cancelRequested Boolean     @default(false)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  startedAt       DateTime?
+  completedAt     DateTime?
+
+  @@unique([idempotencyKey])
+    @@index([status])
+    @@index([status, scheduledAt])
+    @@index([leaseExpiresAt])
+    @@index([status, priority, createdAt])
+    @@index([tenantId])
+    @@map("jobs")
+}
+
+model Outbox{
+id            String        @id @default(uuid())
+eventId        String       @unique
+eventType       String
+topic            String
+payload           Json
+createdAt          DateTime    @default(now())
+publishedAt          DateTime?
+
+
+@@index([publishedAt, createdAt])
+  @@map("outbox")
+
+}
+
+
+
+================================================
+FILE: packages/database/src/client.ts
+================================================
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "./generated/prisma/client.js";
+import pg from "pg";
+
+export type CreatePrismaOptions = {
+  connectionString: string;
+  log?: Array<"error" | "warn" | "info" | "query">;
+};
+
+/**
+ * Factory so each app gets its own pool but the same generated client types.
+ */
+export function createPrismaClient(options: CreatePrismaOptions): PrismaClient {
+  const pool = new pg.Pool({ connectionString: options.connectionString });
+  const adapter = new PrismaPg(pool);
+
+  return new PrismaClient({
+    adapter,
+    log: options.log ?? ["error"],
+  });
+}
+
+export { PrismaClient };
+export type {
+  Job,
+  Outbox,
+  JobStatus,
+  JobPriority,
+  Prisma,
+} from "./generated/prisma/client.js";
+
+
+================================================
+FILE: packages/database/src/index.ts
+================================================
+export {
+  createPrismaClient,
+  PrismaClient,
+} from "./client.js";
+
+export type {
+  Job,
+  Outbox,
+  JobStatus,
+  JobPriority,
+  Prisma,
+  CreatePrismaOptions,
+} from "./client.js";
 
 
 ================================================

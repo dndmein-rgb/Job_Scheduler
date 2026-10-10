@@ -1,5 +1,5 @@
 import { PrismaPg } from "@prisma/adapter-pg";
-import { PrismaClient } from "../generated/prisma/client.js";
+import { PrismaClient } from "@job-platform/database";
 import { config } from "../config/index.js";
 import pg from "pg";
 import { logger } from "../config/logger.js";
@@ -36,4 +36,4 @@ export type {
   JobStatus,
   JobPriority,
   Prisma,
-} from "../generated/prisma/client.js";
+} from "@job-platform/database";

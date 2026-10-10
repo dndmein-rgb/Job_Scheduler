@@ -13,6 +13,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@job-platform/database": "*",
     "@job-platform/shared-events": "*",
     "@job-platform/shared-kafka": "*",
     "@job-platform/shared-types": "*",
