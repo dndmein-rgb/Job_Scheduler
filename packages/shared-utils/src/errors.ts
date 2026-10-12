@@ -60,3 +60,15 @@ export class PermanentError extends AppError {
     this.name = "PermanentError";
   }
 }
+
+/** HTTP 429 – too many requests in the current window */
+export class RateLimitError extends AppError {
+  constructor(
+    message = "Rate limit exceeded",
+    public readonly retryAfterSec: number = 60,
+    details?: unknown,
+  ) {
+    super("RATE_LIMITED", message, 429, details);
+    this.name = "RateLimitError";
+  }
+}

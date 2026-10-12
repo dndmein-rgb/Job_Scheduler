@@ -1,6 +1,8 @@
 import { Job, type Prisma } from "../../infrastructure/prisma.js";
 import { CreateJobWriteData, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
 
+export type JobStatusCounts = Record<string, number>;
+
 export interface JobInterface {
   findById(id: string): Promise<Job | null>;
   findByIdempotencyKey(key: string): Promise<Job | null>;
@@ -16,5 +18,6 @@ export interface JobInterface {
       events: OutboxEventInput[],
    ): Promise<Job>
 
-  updateStatusConditionalWithOutbox(id:string,fromStatuses:string[],data:Prisma.JobUpdateInput,events:OutboxEventInput[]):Promise<Job|null>
+  updateStatusConditionalWithOutbox(id: string, fromStatuses: string[], data: Prisma.JobUpdateInput, events: OutboxEventInput[]): Promise<Job | null>
+  countByStatus(): Promise<JobStatusCounts>;
 }

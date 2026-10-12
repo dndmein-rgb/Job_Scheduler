@@ -1,6 +1,7 @@
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
+import { DomainPriority, mapPriorityToBullmq } from "@job-platform/shared-utils";
 
 export const JOB_QUEUE_NAME = "jobs";
 export const JOB_PROCESS_NAME = "process";
@@ -16,11 +17,23 @@ export const jobQueue = new Queue<QueueJobData>(JOB_QUEUE_NAME, {
   },
 });
 
-export async function enqueueJob(jobId: string): Promise<void> {
+export async function enqueueJob(
+  jobId: string,
+  priority?: DomainPriority,
+): Promise<void> {
+  const bullPriority = mapPriorityToBullmq(priority);
   await jobQueue.add(
     JOB_PROCESS_NAME,
     { jobId },
-    { jobId }, // stable id → BullMQ dedupe
+    {
+      // stable id → at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
+      jobId,
+      priority: bullPriority,
+    },
   );
-  logger.info("Scheduler enqueued job", { jobId });
+  logger.info("Scheduler enqueued job to BullMQ", {
+    jobId,
+    priority: priority ?? "MEDIUM",
+    bullPriority,
+  });
 }

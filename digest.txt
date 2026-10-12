@@ -27,6 +27,14 @@ Directory structure:
     │   │       │   ├── req.middleware.ts
     │   │       │   └── validate.middleware.ts
     │   │       ├── modules/
+    │   │       │   ├── admin/
+    │   │       │   │   ├── admin.container.ts
+    │   │       │   │   ├── admin.controller.ts
+    │   │       │   │   ├── admin.interface.ts
+    │   │       │   │   ├── admin.route.ts
+    │   │       │   │   ├── admin.schema.ts
+    │   │       │   │   ├── admin.service.ts
+    │   │       │   │   └── admin.types.ts
     │   │       │   ├── health/
     │   │       │   │   └── health.route.ts
     │   │       │   ├── job/
@@ -144,7 +152,8 @@ Directory structure:
             └── src/
                 ├── asyncHandler.ts
                 ├── errors.ts
-                └── index.ts
+                ├── index.ts
+                └── priority.ts
 
 ================================================
 FILE: docker-compose.yml
@@ -289,7 +298,7 @@ FILE: package.json
     "build:packages": "npm run build -w @job-platform/shared-types && npm run build -w @job-platform/shared-events && npm run build -w @job-platform/shared-kafka && npm run build -w @job-platform/shared-utils && npm run build -w @job-platform/database",
     "db:generate": "npm run generate -w @job-platform/database",
     "db:migrate": "npm run migrate -w @job-platform/database",
-    "db:studio": "npm run prisma:studio -w @job-platform/database",
+    "db:studio": "npm run studio -w @job-platform/database",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",
@@ -444,7 +453,8 @@ import { errorMiddleware } from "./middlewares/error.middleware.js";
 
 import healthRoutes from "./modules/health/health.route.js";
 import jobRoutes from "./modules/job/job.route.js";
-import workerRoutes from "./modules/worker/worker.route.js"
+import workerRoutes from "./modules/worker/worker.route.js";
+import adminRoutes from "./modules/admin/admin.route.js";  // ← add
 
 export function createApp() {
   const app = express();
@@ -457,6 +467,7 @@ export function createApp() {
   app.use(healthRoutes);
   app.use("/jobs", jobRoutes);
   app.use("/workers", workerRoutes);
+  app.use("/admin", adminRoutes);  // ← add
 
   app.use((_req, res) => {
     res.status(404).json({
@@ -647,6 +658,10 @@ FILE: apps/job-service/src/infrastructure/bullmq.ts
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
+import {
+  DomainPriority,
+  mapPriorityToBullmq,
+} from "@job-platform/shared-utils";
 
 export const JOB_QUEUE_NAME = "jobs";
 export const JOB_PROCESS_NAME = "process";
@@ -668,16 +683,25 @@ jobQueue.on("error", (err) => {
   logger.error("BullMQ queue error", { err });
 });
 
-export async function enqueueJob(jobId: string): Promise<void> {
+export async function enqueueJob(
+  jobId: string,
+  priority?: DomainPriority,
+): Promise<void> {
+  const bullPriority = mapPriorityToBullmq(priority);
   await jobQueue.add(
     JOB_PROCESS_NAME,
     { jobId },
     {
       // stable id â†’ at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
       jobId,
+      priority: bullPriority,
     },
   );
-  logger.info("Enqueued job to BullMQ", { jobId });
+  logger.info("Enqueued job to BullMQ", {
+    jobId,
+    priority: priority ?? "MEDIUM",
+    bullPriority,
+  });
 }
 
 export async function closeJobQueue(): Promise<void> {
@@ -1083,6 +1107,356 @@ export function validateQuery<T>(schema: ZodSchema<T>): RequestHandler {
 
 
 ================================================
+FILE: apps/job-service/src/modules/admin/admin.container.ts
+================================================
+import { JobRepository } from "../job/job.repository.js";
+import { AdminService } from "./admin.service.js";
+
+const jobRepository = new JobRepository();
+export const adminService=new AdminService(jobRepository)
+
+
+================================================
+FILE: apps/job-service/src/modules/admin/admin.controller.ts
+================================================
+import type { Request, Response } from "express";
+import { asyncHandler } from "@job-platform/shared-utils";
+import { adminService } from "./admin.container.js";
+import type { ListDeadJobsQuery } from "./admin.schema.js";
+
+export const listDeadJobs = asyncHandler(async (req: Request, res: Response) => {
+  const query =
+    (req as Request & { validatedQuery?: ListDeadJobsQuery }).validatedQuery ??
+    (req.query as unknown as ListDeadJobsQuery);
+
+  const result = await adminService.listDeadJobs({
+    type: query.type,
+    tenantId: query.tenantId,
+    page: query.page,
+    limit: query.limit,
+  });
+
+  res.status(200).json({
+    success: true,
+    data: result.items,
+    meta: {
+      total: result.total,
+      page: result.page,
+      limit: result.limit,
+      totalPages: result.totalPages,
+    },
+  });
+});
+
+export const retryDeadJob = asyncHandler(async (req: Request, res: Response) => {
+  const job = await adminService.retryDead(req.params.id as string);
+  res.status(200).json({ success: true, data: job });
+});
+
+export const cancelDeadJob = asyncHandler(async (req: Request, res: Response) => {
+  const reason =
+    typeof req.body?.reason === "string" ? req.body.reason : undefined;
+  const job = await adminService.cancelDead(req.params.id as string, reason);
+  res.status(200).json({ success: true, data: job });
+});
+
+export const getStats = asyncHandler(async (_req: Request, res: Response) => {
+  const stats = await adminService.getStats();
+  res.status(200).json({ success: true, data: stats });
+});
+
+
+================================================
+FILE: apps/job-service/src/modules/admin/admin.interface.ts
+================================================
+[Empty file]
+
+
+================================================
+FILE: apps/job-service/src/modules/admin/admin.route.ts
+================================================
+import { Router } from "express";
+import { validateBody, validateQuery } from "../../middlewares/validate.middleware.js";
+import {
+  cancelDeadBodySchema,
+  listDeadJobsQuerySchema,
+} from "./admin.schema.js";
+import {
+  cancelDeadJob,
+  getStats,
+  listDeadJobs,
+  retryDeadJob,
+} from "./admin.controller.js";
+
+const router = Router();
+
+/** List DEAD jobs (DLQ view) */
+router.get("/dead-jobs", validateQuery(listDeadJobsQuerySchema), listDeadJobs);
+
+/** Retry a DEAD job â†’ QUEUED + enqueue */
+router.post("/dead-jobs/:id/retry", retryDeadJob);
+
+/** Permanently cancel a DEAD job â†’ CANCELLED */
+router.post(
+  "/dead-jobs/:id/cancel",
+  validateBody(cancelDeadBodySchema),
+  cancelDeadJob,
+);
+
+/** Aggregate job counts by status */
+router.get("/stats", getStats);
+
+export default router;
+
+
+================================================
+FILE: apps/job-service/src/modules/admin/admin.schema.ts
+================================================
+import { z } from "zod";
+
+export const listDeadJobsQuerySchema = z.object({
+  type: z.string().min(1).optional(),
+  tenantId: z.string().min(1).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+export type ListDeadJobsQuery = z.infer<typeof listDeadJobsQuerySchema>;
+
+export const cancelDeadBodySchema = z.object({
+  reason: z.string().max(512).optional().nullable(),
+});
+
+export type CancelDeadBody = z.infer<typeof cancelDeadBodySchema>;
+
+
+
+================================================
+FILE: apps/job-service/src/modules/admin/admin.service.ts
+================================================
+/**
+ * Admin / DLQ operations.
+ * DEAD jobs are still rows in `jobs` with status = DEAD.
+ * We do not introduce a separate DLQ table.
+ */
+
+import { JobStatus } from "@job-platform/shared-types";
+import { JobInterface } from "../job/job.interface.js";
+import { JobStats, ListDeadJobsFilter, ListDeadJobsResult } from "./admin.types.js";
+import { Job, Prisma } from "../../infrastructure/prisma.js";
+import { ConflictError, generateId, NotFoundError } from "@job-platform/shared-utils";
+import { JOB_EVENT_TYPES } from "@job-platform/shared-events";
+import { TOPICS } from "@job-platform/shared-kafka";
+import { logger } from "../../config/logger.js";
+import { enqueueJob } from "../../infrastructure/bullmq.js";
+
+export class AdminService {
+  constructor(private readonly jobRepo: JobInterface) {
+    
+  }
+
+  /**
+     * List only DEAD jobs (paginated + optional type/tenant filters).
+     */
+
+  async listDeadJobs(filter: ListDeadJobsFilter): Promise<ListDeadJobsResult> {
+    return this.jobRepo.list({
+      tenantId: filter.tenantId,
+      status: JobStatus.DEAD,
+      type: filter.type,
+      page: filter.page,
+      limit: filter.limit
+    })
+  }
+
+  /**
+     * Admin retry of a DEAD job â†’ QUEUED + enqueue.
+     * Same semantics as JobService.retry, but restricted to DEAD.
+     */
+  async retryDead(id: string): Promise<Job> {
+    const existing = await this.jobRepo.findById(id);
+    if (!existing) throw new NotFoundError("Job", id);
+    if (existing.status !== JobStatus.DEAD) {
+      throw new ConflictError(
+        `Admin dead-retry only allowed for DEAD jobs (current: ${existing.status})`,
+        { status: existing.status },
+      );
+    }
+    const eventId = generateId();
+    const events = [
+      {
+        eventId,
+        eventType: JOB_EVENT_TYPES.QUEUED,
+        topic: TOPICS.JOB_EVENTS,
+        payload: {
+          eventId,
+          eventType: JOB_EVENT_TYPES.QUEUED,
+          occurredAt: new Date().toISOString(),
+          jobId: id,
+          jobType: existing.type,
+          tenantId: existing.tenantId,
+          payload: {
+            status: JobStatus.QUEUED,
+            priority: existing.priority,
+            adminRetry: true,
+            fromDead: true,
+          },
+        } as Prisma.InputJsonValue,
+      },
+    ];
+    const retried = await this.jobRepo.updateStatusConditionalWithOutbox(id, [JobStatus.DEAD], {
+      status: JobStatus.QUEUED,
+      error: null,
+      attempts: 0,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      completedAt: null,
+      cancelRequested: false,
+    }, events)
+    if (!retried) {
+      throw new ConflictError(`Cannot retry job in status ${existing.status}`, {
+        status: existing.status,
+      });
+    }
+
+    try {
+      await enqueueJob(id,existing.priority);
+    } catch (err) {
+      logger.error("Admin dead-retry: DB is QUEUED but enqueue failed", {
+        jobId: id,
+        err,
+      });
+    }
+    
+    logger.info("Dead job admin-retried", { jobId: id });
+    return retried;
+  }
+  /**
+     * Permanently close a DEAD job â†’ CANCELLED.
+     * Requires DEAD â†’ CANCELLED in the state machine.
+     */
+
+  async cancelDead(id: string, reason?: string | null): Promise<Job> {
+    const existing = await this.jobRepo.findById(id);
+    if (!existing) throw new NotFoundError("Job", id);
+    
+    if (existing.status !== JobStatus.DEAD) {
+      throw new ConflictError(
+        `Admin dead-cancel only allowed for DEAD jobs (current: ${existing.status})`,
+        { status: existing.status },
+      );
+    }
+    
+    const eventId = generateId();
+    const events = [
+      {
+        eventId,
+        eventType: JOB_EVENT_TYPES.CANCELLED,
+        topic: TOPICS.JOB_EVENTS,
+        payload: {
+          eventId,
+          eventType: JOB_EVENT_TYPES.CANCELLED,
+          occurredAt: new Date().toISOString(),
+          jobId: id,
+          jobType: existing.type,
+          tenantId: existing.tenantId,
+          payload: {
+            reason: reason ?? "admin_dead_cancel",
+            fromDead: true,
+          },
+        } as Prisma.InputJsonValue,
+      },
+    ];
+    
+    const cancelled = await this.jobRepo.updateStatusConditionalWithOutbox(
+      id,
+      [JobStatus.DEAD],
+      {
+        status: JobStatus.CANCELLED,
+        cancelRequested: true,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+      },
+      events,
+    );
+    
+    if (!cancelled) {
+      throw new ConflictError(
+        `Cannot cancel dead job in status ${existing.status}`,
+        { status: existing.status },
+      );
+    }
+    
+    logger.info("Dead job cancelled by admin", {
+      jobId: id,
+      reason: reason ?? null,
+    });
+    return cancelled;
+  }
+  
+
+
+  /**
+     * Simple aggregate counts by status (source of truth = Postgres).
+     */
+
+  async getStats(): Promise<JobStats>{
+    const byStatus = await this.jobRepo.countByStatus();
+    
+        const get = (s: string) => byStatus[s] ?? 0;
+        const total = Object.values(byStatus).reduce((sum, n) => sum + n, 0);
+    
+        return {
+          byStatus,
+          total,
+          dead: get(JobStatus.DEAD),
+          running: get(JobStatus.RUNNING),
+          queued: get(JobStatus.QUEUED),
+          failed: get(JobStatus.FAILED),
+          scheduled: get(JobStatus.SCHEDULED),
+          completed: get(JobStatus.COMPLETED),
+          cancelled: get(JobStatus.CANCELLED),
+          retrying: get(JobStatus.RETRYING),
+        };
+      }
+  
+}
+
+
+================================================
+FILE: apps/job-service/src/modules/admin/admin.types.ts
+================================================
+import { Job } from "../../infrastructure/prisma.js";
+
+export type ListDeadJobsFilter = {
+  type?: string;
+  tenantId?: string;
+  page: number;
+  limit:number
+}
+
+export type ListDeadJobsResult = {
+  items: Job[];
+  total:number
+  page: number;
+  limit: number;
+  totalPages:number
+}
+
+export type JobStats = {
+  byStatus: Record<string, number>;
+    total: number;
+    dead: number;
+    running: number;
+    queued: number;
+    failed: number;
+    scheduled: number;
+    completed: number;
+    cancelled: number;
+    retrying: number;
+}
+
+
+================================================
 FILE: apps/job-service/src/modules/health/health.route.ts
 ================================================
 import { Router } from "express";
@@ -1189,6 +1563,8 @@ FILE: apps/job-service/src/modules/job/job.interface.ts
 import { Job, type Prisma } from "../../infrastructure/prisma.js";
 import { CreateJobWriteData, ListJobsFilter, ListJobsResult, OutboxEventInput } from "./job.types.js";
 
+export type JobStatusCounts = Record<string, number>;
+
 export interface JobInterface {
   findById(id: string): Promise<Job | null>;
   findByIdempotencyKey(key: string): Promise<Job | null>;
@@ -1204,7 +1580,8 @@ export interface JobInterface {
       events: OutboxEventInput[],
    ): Promise<Job>
 
-  updateStatusConditionalWithOutbox(id:string,fromStatuses:string[],data:Prisma.JobUpdateInput,events:OutboxEventInput[]):Promise<Job|null>
+  updateStatusConditionalWithOutbox(id: string, fromStatuses: string[], data: Prisma.JobUpdateInput, events: OutboxEventInput[]): Promise<Job | null>
+  countByStatus(): Promise<JobStatusCounts>;
 }
 
 
@@ -1214,7 +1591,7 @@ FILE: apps/job-service/src/modules/job/job.repository.ts
 ================================================
 import { generateId } from "@job-platform/shared-utils";
 import { Job, Prisma, prisma } from "../../infrastructure/prisma.js";
-import { JobInterface } from "./job.interface.js";
+import { JobInterface, JobStatusCounts } from "./job.interface.js";
 import {
   CreateJobWriteData,
   ListJobsFilter,
@@ -1370,6 +1747,17 @@ export class JobRepository implements JobInterface {
       return tx.job.findUniqueOrThrow({ where: { id } });
     });
   }
+  async countByStatus(): Promise<JobStatusCounts> {
+    const groups = await prisma.job.groupBy({
+      by: ["status"],
+      _count: { _all: true },
+    })
+    const counts: Record<string, number> = {}
+    for (const row of groups) {
+      counts[row.status]=row._count._all
+    }
+    return counts;
+  }
 }
 
 
@@ -1511,7 +1899,7 @@ export class JobService {
     });
     if (job.status === "QUEUED") {
       try {
-        await enqueueJob(job.id)
+        await enqueueJob(job.id,job.priority)
       } catch (err) {
         // Job is durable in DB; missing queue message is recoverable later
             logger.error("Failed to enqueue job (DB row exists as QUEUED)", {
@@ -1648,7 +2036,7 @@ export class JobService {
     }
   
     try {
-      await enqueueJob(id);
+      await enqueueJob(id,existing.priority);
     } catch (err) {
       logger.error("Admin retry: DB is QUEUED but enqueue failed", { jobId: id, err });
     }
@@ -1683,7 +2071,7 @@ const ALLOWED_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
   FAILED: [JobStatus.RETRYING, JobStatus.DEAD,JobStatus.QUEUED],// admin retry
   RETRYING: [JobStatus.QUEUED,JobStatus.CANCELLED],
   COMPLETED: [],
-  DEAD: [JobStatus.QUEUED],// admin retry
+  DEAD: [JobStatus.QUEUED,JobStatus.CANCELLED],// admin retry
   CANCELLED: [],
 };
 
@@ -2173,6 +2561,7 @@ FILE: apps/reaper/src/infrastructure/bullmq.ts
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
+import { DomainPriority, mapPriorityToBullmq } from "@job-platform/shared-utils";
 
 export const JOB_QUEUE_NAME = "jobs";
 export const JOB_PROCESS_NAME = "process";
@@ -2188,13 +2577,25 @@ export const jobQueue = new Queue<QueueJobData>(JOB_QUEUE_NAME, {
   },
 });
 
-export async function enqueueJob(jobId: string): Promise<void> {
+export async function enqueueJob(
+  jobId: string,
+  priority?: DomainPriority,
+): Promise<void> {
+  const bullPriority = mapPriorityToBullmq(priority);
   await jobQueue.add(
     JOB_PROCESS_NAME,
     { jobId },
-    { jobId }, // stable id â†’ BullMQ dedupe
+    {
+      // stable id â†’ at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
+      jobId,
+      priority: bullPriority,
+    },
   );
-  logger.info("Reaper re-enqueued job", { jobId });
+  logger.info("Reaper re-enqued job", {
+    jobId,
+    priority: priority ?? "MEDIUM",
+    bullPriority,
+  });
 }
 
 
@@ -2340,7 +2741,7 @@ export class ReaperService {
         }
         // Re-enqueue after the DB commit (same pattern as job-service create).
         try {
-          await enqueueJob(job.id);
+          await enqueueJob(job.id,job.priority);
         } catch (err) {
           logger.error(
             "Reaper: DB recovered but enqueue failed (job is QUEUED)",
@@ -2685,6 +3086,7 @@ FILE: apps/scheduler/src/infrastructure/bullmq.ts
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
+import { DomainPriority, mapPriorityToBullmq } from "@job-platform/shared-utils";
 
 export const JOB_QUEUE_NAME = "jobs";
 export const JOB_PROCESS_NAME = "process";
@@ -2700,13 +3102,25 @@ export const jobQueue = new Queue<QueueJobData>(JOB_QUEUE_NAME, {
   },
 });
 
-export async function enqueueJob(jobId: string): Promise<void> {
+export async function enqueueJob(
+  jobId: string,
+  priority?: DomainPriority,
+): Promise<void> {
+  const bullPriority = mapPriorityToBullmq(priority);
   await jobQueue.add(
     JOB_PROCESS_NAME,
     { jobId },
-    { jobId }, // stable id â†’ BullMQ dedupe
+    {
+      // stable id â†’ at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
+      jobId,
+      priority: bullPriority,
+    },
   );
-  logger.info("Scheduler enqueued job", { jobId });
+  logger.info("Scheduler enqueued job to BullMQ", {
+    jobId,
+    priority: priority ?? "MEDIUM",
+    bullPriority,
+  });
 }
 
 
@@ -3148,6 +3562,7 @@ FILE: apps/worker/src/infrastructure/bullmq.ts
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
+import { DomainPriority, mapPriorityToBullmq } from "@job-platform/shared-utils";
 
 export const JOB_QUEUE_NAME = "jobs";
 export const JOB_PROCESS_NAME = "process"
@@ -3162,13 +3577,25 @@ const jobQueue = new Queue<QueueJobData>(JOB_QUEUE_NAME, {
   }
 })
 
-export async function enqueueJob(jobId: string): Promise<void> {
+export async function enqueueJob(
+  jobId: string,
+  priority?: DomainPriority,
+): Promise<void> {
+  const bullPriority = mapPriorityToBullmq(priority);
   await jobQueue.add(
     JOB_PROCESS_NAME,
     { jobId },
-    { jobId }, // stable id â†’ BullMQ dedupe
+    {
+      // stable id â†’ at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
+      jobId,
+      priority: bullPriority,
+    },
   );
-  logger.info("Worker enqueued job (retry)", { jobId });
+  logger.info("Worker enqueued job retry", {
+    jobId,
+    priority: priority ?? "MEDIUM",
+    bullPriority,
+  });
 }
 
 
@@ -3683,7 +4110,7 @@ export class JobLifecycleService {
     }
 
     try {
-      await enqueueJob(jobId);
+      await enqueueJob(jobId,promoted.priority);
     } catch (err) {
       logger.error("Retry promote: DB is QUEUED but enqueue failed", {
         jobId,
@@ -3760,7 +4187,7 @@ export class JobLifecycleService {
     }
   
     try {
-      await enqueueJob(jobId);
+      await enqueueJob(jobId,released.priority);
     } catch (err) {
       logger.error("releaseToQueue: DB QUEUED but enqueue failed", { jobId, err });
     }
@@ -3840,7 +4267,7 @@ const ALLOWED: Record<JobStatus, readonly JobStatus[]> = {
   FAILED: [JobStatus.RETRYING, JobStatus.DEAD,JobStatus.QUEUED],// admin retry
   RETRYING: [JobStatus.QUEUED,JobStatus.CANCELLED],
   COMPLETED: [],
-  DEAD: [JobStatus.QUEUED],// admin retry
+  DEAD: [JobStatus.QUEUED,JobStatus.CANCELLED],// admin retry
   CANCELLED: [],
 };
 
@@ -5013,6 +5440,11 @@ FILE: packages/shared-utils/src/index.ts
 ================================================
 export * from "./errors.js";
 export { asyncHandler } from "./asyncHandler.js";
+export {
+  mapPriorityToBullmq,
+  DEFAULT_BULLMQ_PRIORITY,
+  type DomainPriority,
+} from "./priority.js";
 
 import { v4 as uuidv4 } from "uuid";
 import type { Uuid } from "@job-platform/shared-types";
@@ -5032,5 +5464,25 @@ export function calculateBackoffMs(
 ): number {
   const exp = Math.min(capMs, baseMs * Math.pow(2, attempt));
   return Math.floor(Math.random() * exp);
+}
+
+
+
+================================================
+FILE: packages/shared-utils/src/priority.ts
+================================================
+export type DomainPriority = "LOW" | "HIGH" | "MEDIUM" | string
+
+const PRIORITY_MAP: Record<string, number> = {
+  HIGH: 1,
+  MEDIUM: 5,
+  LOW:10
+}
+
+export const DEFAULT_BULLMQ_PRIORITY = 5;
+
+export function mapPriorityToBullmq(priority?: DomainPriority | null): number {
+  if (!priority) return DEFAULT_BULLMQ_PRIORITY;
+  return PRIORITY_MAP[priority] ?? DEFAULT_BULLMQ_PRIORITY;
 }
 

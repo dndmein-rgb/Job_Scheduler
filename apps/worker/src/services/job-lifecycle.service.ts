@@ -419,7 +419,7 @@ export class JobLifecycleService {
     }
 
     try {
-      await enqueueJob(jobId);
+      await enqueueJob(jobId,promoted.priority);
     } catch (err) {
       logger.error("Retry promote: DB is QUEUED but enqueue failed", {
         jobId,
@@ -496,7 +496,7 @@ export class JobLifecycleService {
     }
   
     try {
-      await enqueueJob(jobId);
+      await enqueueJob(jobId,released.priority);
     } catch (err) {
       logger.error("releaseToQueue: DB QUEUED but enqueue failed", { jobId, err });
     }

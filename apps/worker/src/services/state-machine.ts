@@ -14,7 +14,7 @@ const ALLOWED: Record<JobStatus, readonly JobStatus[]> = {
   FAILED: [JobStatus.RETRYING, JobStatus.DEAD,JobStatus.QUEUED],// admin retry
   RETRYING: [JobStatus.QUEUED,JobStatus.CANCELLED],
   COMPLETED: [],
-  DEAD: [JobStatus.QUEUED],// admin retry
+  DEAD: [JobStatus.QUEUED,JobStatus.CANCELLED],// admin retry
   CANCELLED: [],
 };
 

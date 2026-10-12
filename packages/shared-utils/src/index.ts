@@ -1,5 +1,10 @@
 export * from "./errors.js";
 export { asyncHandler } from "./asyncHandler.js";
+export {
+  mapPriorityToBullmq,
+  DEFAULT_BULLMQ_PRIORITY,
+  type DomainPriority,
+} from "./priority.js";
 
 import { v4 as uuidv4 } from "uuid";
 import type { Uuid } from "@job-platform/shared-types";

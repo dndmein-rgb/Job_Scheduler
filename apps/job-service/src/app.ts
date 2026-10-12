@@ -1,12 +1,15 @@
 import express from "express";
 import helmet from "helmet";
+
 import { corsMiddleware } from "./middlewares/cors.middleware.js";
 import { requestLogger } from "./middlewares/req.middleware.js";
 import { errorMiddleware } from "./middlewares/error.middleware.js";
+import { globalRateLimiter } from "./middlewares/rate-limit.middleware.js";
 
 import healthRoutes from "./modules/health/health.route.js";
 import jobRoutes from "./modules/job/job.route.js";
-import workerRoutes from "./modules/worker/worker.route.js"
+import workerRoutes from "./modules/worker/worker.route.js";
+import adminRoutes from "./modules/admin/admin.route.js";  
 
 export function createApp() {
   const app = express();
@@ -14,11 +17,13 @@ export function createApp() {
   app.use(helmet());
   app.use(corsMiddleware);
   app.use(express.json({ limit: "1mb" }));
+  app.use(globalRateLimiter);
   app.use(requestLogger);
 
   app.use(healthRoutes);
   app.use("/jobs", jobRoutes);
   app.use("/workers", workerRoutes);
+  app.use("/admin", adminRoutes);  // ← add
 
   app.use((_req, res) => {
     res.status(404).json({

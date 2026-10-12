@@ -1,6 +1,10 @@
 import { Queue } from "bullmq";
 import { redis } from "./redis.js";
 import { logger } from "../config/logger.js";
+import {
+  DomainPriority,
+  mapPriorityToBullmq,
+} from "@job-platform/shared-utils";
 
 export const JOB_QUEUE_NAME = "jobs";
 export const JOB_PROCESS_NAME = "process";
@@ -22,16 +26,25 @@ jobQueue.on("error", (err) => {
   logger.error("BullMQ queue error", { err });
 });
 
-export async function enqueueJob(jobId: string): Promise<void> {
+export async function enqueueJob(
+  jobId: string,
+  priority?: DomainPriority,
+): Promise<void> {
+  const bullPriority = mapPriorityToBullmq(priority);
   await jobQueue.add(
     JOB_PROCESS_NAME,
     { jobId },
     {
       // stable id → at-most-once enqueue for same jobId (BullMQ dedupe by jobId)
       jobId,
+      priority: bullPriority,
     },
   );
-  logger.info("Enqueued job to BullMQ", { jobId });
+  logger.info("Enqueued job to BullMQ", {
+    jobId,
+    priority: priority ?? "MEDIUM",
+    bullPriority,
+  });
 }
 
 export async function closeJobQueue(): Promise<void> {

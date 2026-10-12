@@ -94,7 +94,7 @@ export class ReaperService {
         }
         // Re-enqueue after the DB commit (same pattern as job-service create).
         try {
-          await enqueueJob(job.id);
+          await enqueueJob(job.id,job.priority);
         } catch (err) {
           logger.error(
             "Reaper: DB recovered but enqueue failed (job is QUEUED)",

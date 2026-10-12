@@ -14,6 +14,11 @@ const envSchema = z.object({
         .string()
         .min(1)
         .transform((value) => value.split(",").map((origin) => origin.trim())),
+  RATE_LIMIT_ENABLED: z.string().default("true").transform((v) => v === "true" || v === "1"),
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().default(60_000),
+  RATE_LIMIT_MAX_GLOBAL: z.coerce.number().default(120),
+  RATE_LIMIT_MAX_TENANT: z.coerce.number().default(30),
+  RATE_LIMIT_MAX_IP: z.coerce.number().default(60),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -1,6 +1,6 @@
 import { generateId } from "@job-platform/shared-utils";
 import { Job, Prisma, prisma } from "../../infrastructure/prisma.js";
-import { JobInterface } from "./job.interface.js";
+import { JobInterface, JobStatusCounts } from "./job.interface.js";
 import {
   CreateJobWriteData,
   ListJobsFilter,
@@ -155,5 +155,16 @@ export class JobRepository implements JobInterface {
   
       return tx.job.findUniqueOrThrow({ where: { id } });
     });
+  }
+  async countByStatus(): Promise<JobStatusCounts> {
+    const groups = await prisma.job.groupBy({
+      by: ["status"],
+      _count: { _all: true },
+    })
+    const counts: Record<string, number> = {}
+    for (const row of groups) {
+      counts[row.status]=row._count._all
+    }
+    return counts;
   }
 }

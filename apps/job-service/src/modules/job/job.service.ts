@@ -80,7 +80,7 @@ export class JobService {
     });
     if (job.status === "QUEUED") {
       try {
-        await enqueueJob(job.id)
+        await enqueueJob(job.id,job.priority)
       } catch (err) {
         // Job is durable in DB; missing queue message is recoverable later
             logger.error("Failed to enqueue job (DB row exists as QUEUED)", {
@@ -217,7 +217,7 @@ export class JobService {
     }
   
     try {
-      await enqueueJob(id);
+      await enqueueJob(id,existing.priority);
     } catch (err) {
       logger.error("Admin retry: DB is QUEUED but enqueue failed", { jobId: id, err });
     }
