@@ -25,6 +25,12 @@ enum JobPriority {
   HIGH
 }
 
+enum WorkerStatus {
+  ONLINE
+  OFFLINE
+  DRAINING
+}
+
 model Job{
 id             String @id @default(uuid())
 type           String
@@ -67,5 +73,19 @@ publishedAt          DateTime?
 
 @@index([publishedAt, createdAt])
   @@map("outbox")
+
+}
+
+model Worker{
+id                     String        @id
+capabilities            String[]    // ["SEND_EMAIL", "GENERATE_REPORT"]
+status                  WorkerStatus @default(ONLINE)
+lastHeartbeatAt            DateTime
+registeredAt              DateTime @default(now())
+metadata                   Json?
+
+
+@@index([status, lastHeartbeatAt])
+  @@map("workers")
 
 }

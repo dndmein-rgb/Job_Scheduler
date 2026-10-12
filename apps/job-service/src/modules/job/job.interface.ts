@@ -14,5 +14,7 @@ export interface JobInterface {
       id: string,
       data: Prisma.JobUpdateInput,
       events: OutboxEventInput[],
-    ): Promise<Job>
+   ): Promise<Job>
+
+  updateStatusConditionalWithOutbox(id:string,fromStatuses:string[],data:Prisma.JobUpdateInput,events:OutboxEventInput[]):Promise<Job|null>
 }

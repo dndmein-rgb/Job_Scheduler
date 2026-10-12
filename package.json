@@ -16,7 +16,7 @@
     "build:packages": "npm run build -w @job-platform/shared-types && npm run build -w @job-platform/shared-events && npm run build -w @job-platform/shared-kafka && npm run build -w @job-platform/shared-utils && npm run build -w @job-platform/database",
     "db:generate": "npm run generate -w @job-platform/database",
     "db:migrate": "npm run migrate -w @job-platform/database",
-    "db:studio": "npm run prisma:studio -w @job-platform/database",
+    "db:studio": "npm run studio -w @job-platform/database",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f",

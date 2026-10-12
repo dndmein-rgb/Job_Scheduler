@@ -27,4 +27,6 @@ export type {
   JobStatus,
   JobPriority,
   Prisma,
+  Worker,
+  WorkerStatus
 } from "./generated/prisma/client.js";

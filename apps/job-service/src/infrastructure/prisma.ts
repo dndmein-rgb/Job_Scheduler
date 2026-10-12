@@ -13,20 +13,16 @@ export const prisma =
   globalForPrisma.prisma ??
   new PrismaClient({
     adapter,
-    log:
-      config.NODE_ENV === "development"
-        ? ["error", "warn"]
-        : ["error"],
+    log: config.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   });
 
 if (config.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
 }
 
-
 prisma.$on("query" as never, (e: { query: string; duration: number }) => {
   if (config.LOG_LEVEL === "debug") {
-    logger.debug("prisma query",{ query: e.query, durationMs: e.duration });
+    logger.debug("prisma query", { query: e.query, durationMs: e.duration });
   }
 });
 
@@ -36,4 +32,6 @@ export type {
   JobStatus,
   JobPriority,
   Prisma,
+  Worker,
+  WorkerStatus,
 } from "@job-platform/database";

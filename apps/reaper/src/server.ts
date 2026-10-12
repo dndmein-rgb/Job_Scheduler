@@ -15,9 +15,9 @@ async function tick() {
   if (tickInFlight) return;
   tickInFlight = true;
   try {
-    const recovered = await reaperService.tick();
-    if (recovered > 0) {
-      logger.info("Reaper tick recovered jobs", { recovered });
+    const result = await reaperService.tick();
+    if (result.jobsRecovered > 0 || result.workersMarkedOffline > 0) {
+      logger.info("Reaper tick", result);
     }
   } catch (err) {
     logger.error("Reaper tick failed", { err });

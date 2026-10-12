@@ -11,6 +11,7 @@ const envSchema = z.object({
   KAFKA_BROKER: z.string().default("localhost:9096"),
   KAFKA_CLIENT_ID: z.string().default("worker"),
   LEASE_MS: z.coerce.number().default(30_000),
+  WORKER_HEARTBEAT_MS: z.coerce.number().default(10_000),
 });
 
 const parsed = envSchema.safeParse(process.env);

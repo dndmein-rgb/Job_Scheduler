@@ -16,10 +16,10 @@ const ALLOWED_TRANSITIONS: Record<JobStatus, readonly JobStatus[]> = {
     JobStatus.CANCELLED,
     JobStatus.QUEUED, // reaper lease recovery only
   ],
-  FAILED: [JobStatus.RETRYING, JobStatus.DEAD],
-  RETRYING: [JobStatus.QUEUED],
+  FAILED: [JobStatus.RETRYING, JobStatus.DEAD,JobStatus.QUEUED],// admin retry
+  RETRYING: [JobStatus.QUEUED,JobStatus.CANCELLED],
   COMPLETED: [],
-  DEAD: [],
+  DEAD: [JobStatus.QUEUED],// admin retry
   CANCELLED: [],
 };
 

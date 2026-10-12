@@ -17,8 +17,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "db:generate": "prisma generate",
-    "db:migrate": "prisma migrate dev --name init",
+    "generate": "prisma generate",
+    "migrate": "prisma migrate dev --name init",
     "studio": "prisma studio"
   },
   "dependencies": {

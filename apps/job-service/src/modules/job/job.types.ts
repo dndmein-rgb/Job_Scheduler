@@ -33,3 +33,9 @@ export type OutboxEventInput = {
   topic: string;
   payload: Prisma.InputJsonValue;
 };
+
+export type ConditionalStatusUpdate = {
+  id: string;
+  fromStatuses: string[];// JobStatus values
+  data:Prisma.JobUpdateInput
+}

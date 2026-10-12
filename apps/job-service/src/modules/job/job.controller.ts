@@ -36,3 +36,15 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
       });
   
 })
+
+export const cancel = asyncHandler(async (req: Request, res: Response) => {
+  const reason =
+    typeof req.body?.reason === "string" ? req.body.reason : undefined;
+  const job = await jobService.cancel(req.params.id as string, reason);
+  res.status(200).json({ success: true, data: job });
+});
+
+export const retry = asyncHandler(async (req: Request, res: Response) => {
+  const job = await jobService.retry(req.params.id as string);
+  res.status(200).json({ success: true, data: job });
+});

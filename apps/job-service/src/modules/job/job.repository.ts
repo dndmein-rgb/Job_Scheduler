@@ -117,4 +117,43 @@ export class JobRepository implements JobInterface {
       return job;
     });
   }
+  /**
+   * Optimistic status transition.
+   * Returns the updated job, or null if no row matched (lost race / wrong status).
+   */
+  async updateStatusConditionalWithOutbox(
+    id: string,
+    fromStatuses: string[],
+    data: Prisma.JobUpdateInput,
+    events: OutboxEventInput[],
+  ): Promise<Job | null> {
+    return prisma.$transaction(async (tx) => {
+      const result = await tx.job.updateMany({
+        where: {
+          id,
+          status: { in: fromStatuses as any },
+        },
+        data,
+      });
+  
+      if (result.count === 0) {
+        return null;
+      }
+  
+      if (events.length > 0) {
+        await tx.outbox.createMany({
+          data: events.map((e) => ({
+            id: generateId(),
+            eventId: e.eventId,
+            eventType: e.eventType,
+            topic: e.topic,
+            payload: e.payload,
+            publishedAt: null,
+          })),
+        });
+      }
+  
+      return tx.job.findUniqueOrThrow({ where: { id } });
+    });
+  }
 }

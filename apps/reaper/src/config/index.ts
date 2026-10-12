@@ -10,6 +10,7 @@ const envSchema = z.object({
   REDIS_URL: z.string().default("redis://:jobplatform@localhost:6381"),
   KAFKA_BROKER: z.string().default("localhost:9096"),
   KAFKA_CLIENT_ID: z.string().default("reaper"),
+  WORKER_STALE_MS: z.coerce.number().default(30_000),
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -10,4 +10,6 @@ export type {
   JobPriority,
   Prisma,
   CreatePrismaOptions,
+  Worker,
+  WorkerStatus
 } from "./client.js";
