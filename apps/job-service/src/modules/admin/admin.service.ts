@@ -12,7 +12,7 @@ import { ConflictError, generateId, NotFoundError } from "@job-platform/shared-u
 import { JOB_EVENT_TYPES } from "@job-platform/shared-events";
 import { TOPICS } from "@job-platform/shared-kafka";
 import { logger } from "../../config/logger.js";
-import { enqueueJob } from "../../infrastructure/bullmq.js";
+import { enqueueJob, jobQueue } from "../../infrastructure/bullmq.js";
 
 export class AdminService {
   constructor(private readonly jobRepo: JobInterface) {
@@ -182,6 +182,24 @@ export class AdminService {
           cancelled: get(JobStatus.CANCELLED),
           retrying: get(JobStatus.RETRYING),
         };
-      }
+  }
+
+
+  async getQueueStats(): Promise<{
+    queue:string,counts:Record<string,number>
+  }>{
+    const counts=await   jobQueue.getJobCounts("waiting",
+          "active",
+          "completed",
+          "failed",
+          "delayed",
+          "paused",
+        );
+        return { queue: "jobs", counts };
+  }
+  async getOutboxStats() {
+    const pending = await this.jobRepo.countOutboxPending();
+    return { pending };
+  }
   
 }

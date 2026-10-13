@@ -43,3 +43,13 @@ export const getStats = asyncHandler(async (_req: Request, res: Response) => {
   const stats = await adminService.getStats();
   res.status(200).json({ success: true, data: stats });
 });
+
+export const getQueueStats = asyncHandler(async (_req: Request, res: Response) => {
+  const data = await adminService.getQueueStats();
+  res.status(200).json({ success: true, data });
+});
+
+export const getOutboxStats = asyncHandler(async (_req: Request, res: Response) => {
+  const data = await adminService.getOutboxStats();
+  res.status(200).json({ success: true, data });
+});

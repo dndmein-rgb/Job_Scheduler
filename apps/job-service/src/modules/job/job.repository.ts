@@ -167,4 +167,8 @@ export class JobRepository implements JobInterface {
     }
     return counts;
   }
+
+  async countOutboxPending(): Promise<number> {
+    return prisma.outbox.count({ where: { publishedAt: null } });
+  }
 }

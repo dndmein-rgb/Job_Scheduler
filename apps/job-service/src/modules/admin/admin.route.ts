@@ -6,12 +6,17 @@ import {
 } from "./admin.schema.js";
 import {
   cancelDeadJob,
+  getOutboxStats,
+  getQueueStats,
   getStats,
   listDeadJobs,
   retryDeadJob,
 } from "./admin.controller.js";
+import { adminAuth } from "../../middlewares/admin-auth.middleware.js";
 
 const router = Router();
+
+router.use(adminAuth);
 
 /** List DEAD jobs (DLQ view) */
 router.get("/dead-jobs", validateQuery(listDeadJobsQuerySchema), listDeadJobs);
@@ -29,4 +34,8 @@ router.post(
 /** Aggregate job counts by status */
 router.get("/stats", getStats);
 
+
+// unlock “everything” for the frontend
+router.get("/queues", getQueueStats);
+router.get("/outbox-stats", getOutboxStats);
 export default router;

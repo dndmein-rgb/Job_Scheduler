@@ -20,4 +20,5 @@ export interface JobInterface {
 
   updateStatusConditionalWithOutbox(id: string, fromStatuses: string[], data: Prisma.JobUpdateInput, events: OutboxEventInput[]): Promise<Job | null>
   countByStatus(): Promise<JobStatusCounts>;
+  countOutboxPending(): Promise<number>;
 }

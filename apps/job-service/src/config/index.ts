@@ -19,6 +19,7 @@ const envSchema = z.object({
   RATE_LIMIT_MAX_GLOBAL: z.coerce.number().default(120),
   RATE_LIMIT_MAX_TENANT: z.coerce.number().default(30),
   RATE_LIMIT_MAX_IP: z.coerce.number().default(60),
+  ADMIN_API_KEY: z.string().min(1).optional(), 
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -32,3 +33,5 @@ export const config = {
   ...parsed.data,
   SERVICE_NAME: "job-service",
 } as const;
+
+console.log("CLIENT_ORIGIN", config.CLIENT_ORIGINS);

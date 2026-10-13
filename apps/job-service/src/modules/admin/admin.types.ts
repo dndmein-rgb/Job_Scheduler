@@ -27,3 +27,20 @@ export type JobStats = {
     cancelled: number;
     retrying: number;
 }
+
+export type QueueStats = {
+  queue: string;
+  counts: {
+    waiting: number;
+    active: number;
+    completed: number;
+    failed: number;
+    delayed: number;
+    paused: number;
+  };
+};
+
+export type OutboxStats = {
+  pending: number;   // publishedAt IS NULL
+  published: number; // optional total published (can skip if slow)
+};

@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: jobplatform
-      POSTGRES_PASSWORD: jobplatform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobplatform}
       POSTGRES_DB: jobplatform
     ports:
       - "5435:5432"
@@ -28,11 +28,12 @@ services:
     restart: unless-stopped
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
     ports:
       - "8085:80"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - job-platform-net
 
@@ -41,7 +42,7 @@ services:
     container_name: job-platform-redis
     restart: unless-stopped
     environment:
-      REDIS_ARGS: "--requirepass jobplatform"
+      REDIS_ARGS: "--requirepass ${REDIS_PASSWORD:-jobplatform}"
     ports:
       - "6381:6379"
       - "8002:8001"
@@ -50,10 +51,15 @@ services:
     networks:
       - job-platform-net
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "jobplatform", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli -a \"$${REDIS_PASSWORD:-jobplatform}\" ping 2>/dev/null || redis-cli -a '${REDIS_PASSWORD:-jobplatform}' ping"
+        ]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
@@ -85,24 +91,148 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     volumes:
       - job_platform_kafka_data:/var/lib/kafka/data
     networks:
       - job-platform-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: job-platform-kafka-ui
     restart: unless-stopped
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     ports:
       - "8084:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: job-platform-cluster
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    networks:
+      - job-platform-net
+
+  job-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job-platform-job-service
+    command: ["node", "apps/job-service/dist/server.js"]
+    restart: unless-stopped
+    env_file:
+      - ./apps/job-service/.env
+    environment:
+      NODE_ENV: production
+      PORT: "3010"
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-dev-admin-key-change-me}
+      DATABASE_URL: "postgresql://jobplatform:${POSTGRES_PASSWORD:-jobplatform}@postgres:5432/jobplatform?schema=public"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-jobplatform}@redis:6379"
+      KAFKA_BROKER: kafka:9092
+      KAFKA_CLIENT_ID: job-service
+      CLIENT_ORIGINS: http://localhost:5173
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_WINDOW_MS: "60000"
+      RATE_LIMIT_MAX_GLOBAL: "120"
+      RATE_LIMIT_MAX_TENANT: "30"
+      RATE_LIMIT_MAX_IP: "60"
+    ports:
+      - "3010:3010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - job-platform-net
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job-platform-worker
+    command: ["node", "apps/worker/dist/server.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://jobplatform:${POSTGRES_PASSWORD:-jobplatform}@postgres:5432/jobplatform?schema=public"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-jobplatform}@redis:6379"
+      KAFKA_BROKER: kafka:9092
+      KAFKA_CLIENT_ID: worker
+      WORKER_ID: worker-1
+      WORKER_CAPABILITIES: SEND_EMAIL,GENERATE_REPORT
+      LEASE_MS: "30000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - job-platform-net
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job-platform-scheduler
+    command: ["node", "apps/scheduler/dist/server.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://jobplatform:${POSTGRES_PASSWORD:-jobplatform}@postgres:5432/jobplatform?schema=public"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-jobplatform}@redis:6379"
+      KAFKA_BROKER: kafka:9092
+      KAFKA_CLIENT_ID: scheduler
+      SCHEDULER_POLL_INTERVAL_MS: "2000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - job-platform-net
+
+  reaper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: job-platform-reaper
+    command: ["node", "apps/reaper/dist/server.js"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://jobplatform:${POSTGRES_PASSWORD:-jobplatform}@postgres:5432/jobplatform?schema=public"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:-jobplatform}@redis:6379"
+      KAFKA_BROKER: kafka:9092
+      KAFKA_CLIENT_ID: reaper
+      REAPER_POLL_INTERVAL_MS: "5000"
+      LEASE_GRACE_MS: "2000"
+      WORKER_STALE_MS: "30000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     networks:
       - job-platform-net
 
@@ -115,3 +245,5 @@ volumes:
 networks:
   job-platform-net:
     driver: bridge
+
+

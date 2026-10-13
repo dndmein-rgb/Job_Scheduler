@@ -1,7 +1,7 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
 import { runReadinessChecks } from "../../infrastructure/readiness.js";
-import { getMetrics, inc } from "../../infrastructure/metrics.js";
+import { getMetrics, inc, metricsText } from "../../infrastructure/metrics.js";
 
 const router = Router();
 
@@ -32,12 +32,15 @@ router.get("/ready", async (_req: Request, res: Response) => {
   });
 });
 
-router.get("/metrics", (_req: Request, res: Response) => {
-  inc("http_requests_total");
-  res.status(200).json({
-    success: true,
-    data: getMetrics(),
-  });
+// GET /metrics → Prometheus text (scrapers)
+router.get("/metrics", async (_req, res) => {
+  res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+  res.status(200).send(await metricsText());
+});
+
+// Optional: keep JSON for humans
+router.get("/metrics.json", (_req, res) => {
+  res.status(200).json({ success: true, data: getMetrics() });
 });
 
 export default router;
